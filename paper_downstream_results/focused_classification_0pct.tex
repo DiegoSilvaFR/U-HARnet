@@ -1,0 +1,23 @@
+\begin{table*}[t]
+\centering
+\caption{R-AUROC for downstream linear-probe classification with the frozen encoder (0\% fine-tuning). Each entry is the mean $\pm$ standard deviation across evaluation units.}
+\label{tab:har_linear_probe_0}
+\small
+\setlength{\tabcolsep}{9pt}
+\renewcommand{\arraystretch}{1.17}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Dataset & CE & Gaussian & Student-$t$ & MC Dropout \\
+\midrule
+CAPTURE-24 & $0.416 \pm 0.089$ & $0.639 \pm 0.071$ & $0.655 \pm 0.083$ & $0.421 \pm 0.105$ \\
+PAMAP2 & $0.482 \pm 0.084$ & $0.359 \pm 0.081$ & $0.297 \pm 0.090$ & $0.336 \pm 0.081$ \\
+RealWorld & $0.624 \pm 0.103$ & $0.365 \pm 0.121$ & $0.348 \pm 0.106$ & $0.354 \pm 0.075$ \\
+USC-HAD & $0.344 \pm 0.074$ & $0.576 \pm 0.086$ & $0.540 \pm 0.072$ & $0.545 \pm 0.091$ \\
+HARTH & $0.431 \pm 0.097$ & $0.483 \pm 0.239$ & $0.462 \pm 0.228$ & $0.303 \pm 0.122$ \\
+\bottomrule
+\end{tabular}
+\par\vspace{3pt}
+\begin{minipage}{0.94\textwidth}
+\footnotesize\emph{Note.} R-AUROC $>0.5$ denotes conventional error ranking; R-AUROC $<0.5$ denotes inverse ranking. Values are averaged per held-out unit (CAPTURE-24: 15 ten-subject test folds; other datasets: LOSO subjects). These directions are descriptive, not significance claims.
+\end{minipage}
+\end{table*}
