@@ -1,0 +1,122 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Virtual Environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+conda-env/
+.conda/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+.profile/
+.jupyter/
+
+# =========================
+# IDE / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =========================
+# Operating System
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Logs / Temporary Files
+# =========================
+*.log
+*.tmp
+*.temp
+*.bak
+*.cache
+tmp/
+temp/
+logs/
+
+# =========================
+# Environment Variables / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# =========================
+# Machine Learning Models
+# =========================
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+*.onnx
+*.mdl
+*.joblib
+*.pkl
+*.pickle
+
+# =========================
+# Large Datasets
+# =========================
+*.parquet
+*.feather
+*.arrow
+*.npz
+*.npy
+*.h5ad
+*.tfrecord
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# =========================
+# Experiment Outputs
+# =========================
+checkpoints/
+runs/
+wandb/
+mlruns/
+lightning_logs/
+tensorboard/
+outputs/
+artifacts/
+
+# =========================
+# Miscellaneous
+# =========================
+*.pid
+*.seed
+.cache/

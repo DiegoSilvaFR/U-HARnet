@@ -9,17 +9,35 @@ import torch.nn.functional as F
 
 from benchmark_upstream_heads import benchmark_heads, risk_coverage_curve_regression, EvalHeads
 from benchmark_upstream_finetuned import make_upstream_results, mc_dropout_finetuned_inference, load_HR_encoder, gaussian_regression_inference, student_t_head_inference
-from linear_probe import train_test_linear_probe
+from linear_probe import train_test_linear_probe_with_alignment, compute_aurc
 
 def _load_user(dataset_root_path, user):
     
     user_path = dataset_root_path + str(user)+'.npz'
-    data = np.load(user_path)
+    with np.load(user_path) as data:
+        y = data["y"]
+        # Inference operates in float32; do not retain float64 ACC windows.
+        X = np.asarray(data["X"], dtype=np.float32)
 
-    y = data["y"]
-    X = data["X"]
-    
-    return X,y
+    return X, y
+
+def _float32_feature_frame(df, feature_dim=1024):
+    """Pack encoder features in a single float32 Pandas block.
+
+    Preserve uncertainties/labels exactly as provided (important for AURC
+    ordering), while avoiding 1024 fragmented Pandas columns and a float64
+    global embedding table.
+    """
+    feature_columns = list(range(feature_dim))
+    features = np.asarray(
+        df[feature_columns].to_numpy(copy=False), dtype=np.float32, order="C"
+    )
+    compact = pd.DataFrame(features, columns=feature_columns)
+    for col in df.columns:
+        if col not in compact.columns:
+            compact[col] = df[col].to_numpy(copy=False)
+    return compact
+
 
 def benchmark_downstream_heads(dataset_root_path, users):
     
@@ -36,8 +54,9 @@ def benchmark_downstream_heads(dataset_root_path, users):
         X,y =  _load_user(dataset_root_path, user)
         
         # 3 heads × N samples
-        df_user = eval_heads.predict(X, return_feats=True)
-       
+        df_user = _float32_feature_frame(eval_heads.predict(X, return_feats=True))
+        del X
+
         # Repeat targets for each head
         df_user["y"] = y
            
@@ -56,12 +75,30 @@ def benchmark_downstream_heads(dataset_root_path, users):
 
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics import roc_auc_score
 
 
-def recall_auroc(embeddings, labels, uncertainty):
+def macro_recall_at_1(labels, correct):
+    """Unweighted mean of per-class top-1 retrieval accuracies.
+
+    Every class present among the *queries* contributes equally, regardless
+    of query count. The nearest-neighbor gallery and correctness indicators
+    are determined separately; this helper does not modify retrieval.
     """
-    Calculate Recall@1 and R-AUROC.
+    labels = np.asarray(labels).reshape(-1)
+    correct = np.asarray(correct, dtype=bool).reshape(-1)
+    if not len(labels) or len(labels) != len(correct):
+        raise ValueError("labels and correct must be nonempty, aligned arrays")
+
+    # Efficient even with millions of windows: O(N) accumulation over classes.
+    _, class_ids = np.unique(labels, return_inverse=True)
+    totals = np.bincount(class_ids)
+    successes = np.bincount(class_ids, weights=correct.astype(np.float64))
+    return float(np.mean(successes / totals))
+
+
+def retrieval_metrics(embeddings, labels, uncertainty):
+    """
+    Calculate Macro-R@1 and AURC.
 
     Parameters
     ----------
@@ -78,10 +115,11 @@ def recall_auroc(embeddings, labels, uncertainty):
     Returns
     -------
     dict
-        R@1, R-AUROC, nearest-neighbor indices,
+        Macro-R@1, AURC, nearest-neighbor indices,
         correctness and cosine distances.
     """
-    embeddings = np.asarray(embeddings, dtype=float)
+    # Match GPU retrieval: exact cosine search using float32 vectors.
+    embeddings = np.asarray(embeddings, dtype=np.float32)
     labels = np.asarray(labels).reshape(-1)
     uncertainty = np.asarray(
         uncertainty, dtype=float
@@ -126,35 +164,36 @@ def recall_auroc(embeddings, labels, uncertainty):
     # Step 3: Define the error indicator.
     error = (~correct).astype(int)
 
-    # Step 4: Compute Recall@1.
-    r_at_1 = float(correct.mean())
+    # Step 4: Each activity class contributes equally to Macro-R@1.
+    macro_r_at_1 = macro_recall_at_1(labels, correct)
 
-    # Step 5: Compute R-AUROC.
-    # Requires both correct and incorrect matches.
-    if np.unique(error).size == 2:
-        auc = float(
-            roc_auc_score(error, uncertainty)
-        )
-    else:
-        auc = float("nan")
+    # Step 5: Risk-coverage summary of retrieval errors.
+    aurc = compute_aurc(error, uncertainty)
 
     return {
-        "R@1": r_at_1,
-        "R-AUROC": auc,
+        "Macro-R@1": macro_r_at_1,
+        "AURC": aurc,
+        "R_all": float(error.mean()),  # Retrieval error prevalence; NOT 1 - Macro-R@1.
         "neighbor_idx": neighbor_idx,
         "correct": correct,
         "cosine_distance": distances[:, 0],
     }
 
+
         
-def summarize_retrieval_by_subject(user_ids, correct, uncertainty):
-    """R@1 and R-AUROC per subject, using the same global NN reference set."""
+def summarize_retrieval_by_subject(user_ids, labels, correct, uncertainty):
+    """Subject-level Macro-R@1 and AURC using the same global NN gallery.
+
+    Macro-R@1 for a subject averages over activities actually observed in that
+    subject. Its mean across subjects need not equal the pooled Macro-R@1.
+    """
     user_ids = np.asarray(user_ids).reshape(-1)
+    labels = np.asarray(labels).reshape(-1)
     correct = np.asarray(correct, dtype=bool).reshape(-1)
     uncertainty = np.asarray(uncertainty, dtype=float).reshape(-1)
 
-    if not (len(user_ids) == len(correct) == len(uncertainty)):
-        raise ValueError("user_ids, correct and uncertainty must align")
+    if not (len(user_ids) == len(labels) == len(correct) == len(uncertainty)):
+        raise ValueError("user_ids, labels, correct and uncertainty must align")
 
     by_subject = {}
     for subject in pd.unique(user_ids):
@@ -163,13 +202,12 @@ def summarize_retrieval_by_subject(user_ids, correct, uncertainty):
         error = (~c).astype(int)
         u = uncertainty[mask]
         by_subject[str(subject)] = {
-            "R@1": float(c.mean()),
-            "R-AUROC": (
-                float(roc_auc_score(error, u))
-                if np.unique(error).size == 2 else float("nan")
-            ),
+            "Macro-R@1": macro_recall_at_1(labels[mask], c),
+            "AURC": compute_aurc(error, u),
+            "R_all": float(error.mean()),  # Same global gallery, subject-specific queries.
         }
     return by_subject
+
 
 
 def make_finetuned_embedding(output_size, dataset_root_path, users, encoder_path):
@@ -213,7 +251,9 @@ def make_finetuned_embedding(output_size, dataset_root_path, users, encoder_path
             features, predicted_hr, hr_uncertainty = mc_dropout_finetuned_inference(encoder, X)
              
  
-        df_user = pd.DataFrame(features)
+        # Keep the full feature matrix float32, not float64.
+        df_user = pd.DataFrame(np.asarray(features, dtype=np.float32))
+        del X, features
 
         # uncertainty learned during upstream HR task
         df_user["u"] = hr_uncertainty
@@ -422,17 +462,23 @@ class OxfordMTLEntropy:
 
 
 
-def recall_auroc_gpu(
+def retrieval_metrics_gpu(
     embeddings,
     labels,
     uncertainty,
     gpu_id=0,
-    query_batch_size=1024,
-    database_batch_size=200_000,
+    query_batch_size=512,
+    database_batch_size=32_768,
     precision="highest",
 ):
     """
-    Exact GPU cosine nearest-neighbor search using PyTorch.
+    Exact (non-approximate) GPU cosine nearest-neighbor search, float32.
+
+    Keep TF32 disabled by default. A bounded query-by-gallery similarity
+    block (512 x 32768 = 64 MiB) replaces the prior ~781 MiB default.
+    Every gallery embedding remains a candidate, and self-matches are excluded.
+    Float32 rounding can change an extremely close tie, but no candidates
+    are skipped and no fp16/approximate nearest-neighbor index is used.
 
     Parameters
     ----------
@@ -461,7 +507,7 @@ def recall_auroc_gpu(
     Returns
     -------
     dict
-        R@1, R-AUROC, neighbor_idx,
+        Macro-R@1, AURC, neighbor_idx,
         correct, cosine_distance.
     """
 
@@ -496,6 +542,9 @@ def recall_auroc_gpu(
         dtype=torch.float32,
         device=device
     ).detach()
+    # Avoid modifying a caller-owned CUDA tensor when normalizing in-place.
+    if isinstance(embeddings, torch.Tensor) and x.data_ptr() == embeddings.data_ptr():
+        x = x.clone()
 
     if x.ndim != 2 or x.shape[0] < 2:
         raise ValueError("Invalid embedding shape.")
@@ -527,8 +576,9 @@ def recall_auroc_gpu(
         ):
             raise ValueError("Invalid embedding norm.")
 
-        x = (x / norms).contiguous()
-
+        # Safe in-place: 'x' is a separate GPU transfer (or a clone above).
+        # Avoid holding two complete (N, 1024) GPU matrices temporarily.
+        x.div_(norms)
         del norms
 
     # Allocate CPU outputs.
@@ -661,29 +711,26 @@ def recall_auroc_gpu(
     # Error indicator.
     error = (~correct).astype(np.int8)
 
-    # Recall@1.
-    r_at_1 = float(correct.mean())
+    # Macro-R@1: unweighted mean of activity-specific retrieval accuracies.
+    macro_r_at_1 = macro_recall_at_1(labels, correct)
 
-    # R-AUROC.
-    if np.unique(error).size == 2:
-        auc = float(
-            roc_auc_score(error, uncertainty)
-        )
-    else:
-        auc = float("nan")
+    # Retrieval AURC from nearest-neighbor errors, lowest uncertainty first.
+    aurc = compute_aurc(error, uncertainty)
 
     return {
-        "R@1": r_at_1,
-        "R-AUROC": auc,
+        "Macro-R@1": macro_r_at_1,
+        "AURC": aurc,
+        "R_all": float(error.mean()),  # Retrieval error prevalence; NOT 1 - Macro-R@1.
         "neighbor_idx": neighbor_idx,
         "correct": correct,
         "cosine_distance": cosine_distance,
     }
 
 
+
 class DownstreamUncertainty:
     
-    def __init__(self, dataset_root, users_ids, dataset_type= 1):
+    def __init__(self, dataset_root, users_ids, dataset_type=1, alignment_inner_folds=2):
         
         """ dataset_type: int 
         0: CAPTURE-24
@@ -693,35 +740,56 @@ class DownstreamUncertainty:
         """
         
         self.dataset_type = dataset_type
+        self.alignment_inner_folds = alignment_inner_folds
         self.epochs = 100 if dataset_type == 0 else 100
         self.dataset_root = dataset_root
         self.users_ids = users_ids
-        self.results = {'zero_shot':{}, 'classification':{}}
+        self.results = {
+            'zero_shot': {}, 'classification': {}, 'alignment_parameters': {},
+            'alignment_protocol': {
+                'outer_split': 'LOSO',
+                'inner_split': 'subject-grouped GroupKFold on outer training users',
+                'inner_folds': int(alignment_inner_folds),
+                'fitted_on': 'inner out-of-fold training predictions only',
+                'labels': 'classification error = (predicted activity != true activity)',
+                'scores': {
+                    'A': 'raw upstream physiological uncertainty',
+                    'B': 'logistic(HR uncertainty)',
+                    'C': 'HAR predictive entropy',
+                    'D': 'logistic(HR uncertainty, HAR entropy)',
+                    'E': 'logistic(HAR entropy)',
+                },
+                'direction': 'larger score means more predicted error',
+                'primary_test': 'D vs E: complementary information from HR',
+            },
+        }
         self.mlt = OxfordMTLEntropy()
         
     
     def make_0_finetuned_results(self, run_linear_probe=True):
         df = benchmark_downstream_heads(self.dataset_root, self.users_ids)
-        z = df[list(range(1024))].values
-        y = df.y.values
+        z = df[list(range(1024))].to_numpy(dtype=np.float32, copy=False)
+        y = df.y.to_numpy(copy=False)
 
         # Compute encoder baseline entropy and ONE global NN search: shared by
         # all uncertainty estimators for the frozen 0% encoder.
         df['u_ce'] = np.asarray(self.mlt.predict(z)).reshape(-1)
-        results = recall_auroc_gpu(z, y, df['u_ce'].values)
+        results = retrieval_metrics_gpu(z, y, df['u_ce'].values)
+        del z  # Feature table remains in df for the LOSO linear probe.
         correct = results['correct']
         error = (~correct).astype(int)
-        print("R@1 zero-finetuned done.")
+        print("Macro-R@1 zero-finetuned done.")
 
         head_results = {}
         for name in ['CE', 'gaussian', 'student_t', 'mc_dropout']:
             col = 'u_ce' if name == 'CE' else name
             u = np.asarray(df[col].values, dtype=float).reshape(-1)
-            auc = float(roc_auc_score(error, u)) if np.unique(error).size == 2 else float('nan')
+            aurc = compute_aurc(error, u)
             head_results[name] = {
-                'R@1': float(results['R@1']),
-                'R-AUROC': auc,
-                'by_subject': summarize_retrieval_by_subject(df.user_id.values, correct, u),
+                'Macro-R@1': float(results['Macro-R@1']),
+                'AURC': aurc,
+                'R_all': float(error.mean()),
+                'by_subject': summarize_retrieval_by_subject(df.user_id.values, y, correct, u),
             }
             print(f"Zero-finetuned {name} done.")
 
@@ -764,63 +832,90 @@ class DownstreamUncertainty:
                 df['y'] = df.y.map(map_labels)
                 u = df[['u']].values
 
-                z = df[[i for i in range(1024)]].values
-                y = df.y.values
+                z = df[list(range(1024))].to_numpy(dtype=np.float32, copy=False)
+                y = df.y.to_numpy(copy=False)
 
-                results = recall_auroc_gpu(z, y, u)
-                print(f"R@1 {encoder_path} done.")
+                results = retrieval_metrics_gpu(z, y, u)
+                del z  # Release temporary matrix before LOSO fitting.
+                print(f"Macro-R@1 {encoder_path} done.")
                 
                 result_per_deepth[encoder_name] = {
-                    'R@1': float(results['R@1']),
-                    'R-AUROC': float(results['R-AUROC']),
+                    'Macro-R@1': float(results['Macro-R@1']),
+                    'AURC': float(results['AURC']),
+                    'R_all': float(results['R_all']),
                     'by_subject': summarize_retrieval_by_subject(
-                        df.user_id.values, results['correct'], u
+                        df.user_id.values, y, results['correct'], u
                     ),
                 }
 
                 if run_linear_probe:
-                    results_LOSO[encoder_name] = self._train_test_linear_prob(
-                        df, ['u'], encoder_path
+                    per_user_scores = self._train_test_linear_prob(
+                        df, ['u'], encoder_path,
+                        method_names={'u': encoder_name}
                     )
+                    # Normalize into method -> subject -> metrics, compatible
+                    # with existing paired-subject statistical exports.
+                    for subject_id, method_scores in per_user_scores.items():
+                        for method_id, metrics in method_scores.items():
+                            results_LOSO.setdefault(method_id, {})[str(subject_id)] = metrics
 
             self.results['zero_shot'][f'finetuned_{finetune_deepth}_results'] = result_per_deepth
 
             if run_linear_probe:
                 self.results['classification'][f'finetuned_{finetune_deepth}_results'] = results_LOSO
             
-    def _train_test_linear_prob(self, df, type_u, encoder_name=''):
-        """Train/evaluate one linear probe per held-out subject (LOSO).
+    def _train_test_linear_prob(self, df, type_u, encoder_name='', method_names=None):
+        """Outer LOSO plus nested, subject-grouped OOF uncertainty alignment.
 
-        Each test set consists exclusively of one subject; training uses all
-        remaining subjects. This split is identical across datasets, including
-        CAPTURE-24. Keys in the result are the actual subject IDs.
+        Each outer test subject is excluded from ALL classifier/calibrator fits.
+        For every outer split, inner GroupKFold produces held-out predictions
+        on the outer-training users to learn the logistic coefficients.
         """
         results_LOSO = {}
         users = df.user_id.unique()
-        if len(users) < 2:
-            raise ValueError('LOSO requires at least two distinct subjects.')
+        if len(users) < 3:
+            raise ValueError('Aligned LOSO needs >= 3 subjects: one outer test '
+                             'and at least two inner-training subjects.')
 
         feature_columns = list(range(1024))
+        if method_names is None:
+            method_names = {col: ('CE' if col == 'u_ce' else col) for col in type_u}
+
+        # Materialize float32 features ONCE, rather than copying the full
+        # 1024-column dataframe twice inside every LOSO fold.
+        all_features = df[feature_columns].to_numpy(dtype=np.float32, copy=False)
+        all_labels = df.y.to_numpy(copy=False)
+        all_user_ids = df.user_id.to_numpy(copy=False)
+
         for fold_idx, user in enumerate(users, start=1):
-            test_mask = df.user_id == user
-            df_train, df_test = df.loc[~test_mask], df.loc[test_mask]
+            test_mask = all_user_ids == user
+            train_mask = ~test_mask
+            X_train, X_test = all_features[train_mask], all_features[test_mask]
+            y_train, y_test = all_labels[train_mask], all_labels[test_mask]
 
-            X_train = df_train[feature_columns].values
-            X_test = df_test[feature_columns].values
-            y_train, y_test = df_train.y.values, df_test.y.values
-            u_test = df_test[type_u]
-
-            results_LOSO[user] = _clean_probe_output(
-                train_test_linear_probe(
-                    X_train, X_test, y_train, y_test, u_test,
-                    epochs=self.epochs
-                )
+            # Both training and test physiological uncertainty are required:
+            # train uncertainties fit the alignment; held-out values only score.
+            u_train, u_test = df.loc[train_mask, type_u], df.loc[test_mask, type_u]
+            per_method, fit_parameters = train_test_linear_probe_with_alignment(
+                X_train=X_train, X_test=X_test,
+                y_train=y_train, y_test=y_test,
+                u_train=u_train, u_test=u_test,
+                train_user_ids=all_user_ids[train_mask],
+                epochs=self.epochs,
+                inner_folds=self.alignment_inner_folds,
+                method_names=method_names,
+                seed=21,
+                return_parameters=True,
             )
+            self.results['alignment_parameters'].setdefault(encoder_name, {})[str(user)] = fit_parameters
+            results_LOSO[str(user)] = _clean_probe_output(per_method)
+            del X_train, X_test
 
             if fold_idx % 10 == 0 or fold_idx == len(users):
-                print(f'LOSO {encoder_name}: {fold_idx}/{len(users)} subjects evaluated.')
+                print(f'LOSO+alignment {encoder_name}: '
+                      f'{fold_idx}/{len(users)} subjects evaluated.')
 
-        print(f'LOSO training for finetuned {encoder_name} done.')
+        print(f'LOSO+alignment {encoder_name} done.')
         return results_LOSO
 
 import json
@@ -900,9 +995,8 @@ import numpy as np
 import pandas as pd
 
 
-# Only these metrics are retained in the statistical outputs:
-#   - zero-shot: R@1 and R-AUROC
-#   - classification: R-AUROC (when available) and every available F1 score
+# Only three metrics are reported: Macro-R@1 (retrieval),
+# macro_f1 (classification), and AURC (retrieval/classification uncertainty).
 
 
 def _is_f1_metric(name):
@@ -910,22 +1004,19 @@ def _is_f1_metric(name):
 
 
 def _clean_probe_metrics(metrics):
-    """Keep all F1 scores and one consistently oriented AUROC only.
-
-    Historical linear-probe outputs may contain c_auroc (correctness positive).
-    Convert it to R-AUROC (retrieval/classification error positive).
-    """
+    """Discard legacy AUROC and fixed-coverage risks from loaded results."""
     if not isinstance(metrics, dict):
         return {}
     cleaned = {}
     for key, value in metrics.items():
         if _is_f1_metric(key) and np.isscalar(value):
             cleaned[key] = value
-    if 'R-AUROC' in metrics:
-        cleaned['R-AUROC'] = metrics['R-AUROC']
-    elif 'c_auroc' in metrics:
-        score = metrics['c_auroc']
-        cleaned['R-AUROC'] = 1.0 - float(score) if score is not None else None
+    if 'AURC' in metrics:
+        cleaned['AURC'] = metrics['AURC']
+    # Preserve the held-out random-rejection baseline in JSON only.
+    # It is intentionally excluded from inferential statistical outputs.
+    if 'R_all' in metrics:
+        cleaned['R_all'] = metrics['R_all']
     return cleaned
 
 
@@ -1010,8 +1101,20 @@ def per_unit_metrics_df(results):
     rows = []
     for regime, methods in results.get('zero_shot', {}).items():
         for method, values in methods.items():
+            if 'Macro-R@1' not in values and 'R@1' in values:
+                raise ValueError(
+                    'Legacy JSON contains standard R@1, not Macro-R@1. '
+                    'Recompute retrieval; do not relabel old R@1 results.'
+                )
             for subject, metrics in values.get('by_subject', {}).items():
-                for key in ('R@1', 'R-AUROC'):
+                if 'Macro-R@1' not in metrics and 'R@1' in metrics:
+                    raise ValueError(
+                        'Legacy subject-level R@1 cannot be converted into '
+                        'Macro-R@1 from aggregate values. Recompute retrieval.'
+                    )
+                if 'AURC' not in metrics:
+                    raise ValueError('Saved retrieval results lack AURC. Recompute retrieval; AUROC cannot be converted to AURC.')
+                for key in ('Macro-R@1', 'AURC'):
                     val = metrics.get(key)
                     if val is not None and np.isfinite(val):
                         rows.append(dict(study='zero_shot', finetuning=regime,
@@ -1022,7 +1125,7 @@ def per_unit_metrics_df(results):
         for method, units in _classification_method_units(data).items():
             for unit, metrics in units.items():
                 for key, value in metrics.items():
-                    if (key == 'R-AUROC' or _is_f1_metric(key)) and value is not None:
+                    if (key == 'AURC' or _is_f1_metric(key)) and value is not None:
                         try:
                             val = float(value)
                         except (TypeError, ValueError):
@@ -1051,7 +1154,7 @@ def summarize_results_df(results):
                              (long.method == method)]
                 row = {'finetuning': regime, 'method': method}
                 if study == 'zero_shot':
-                    metric_names = ('R@1', 'R-AUROC')
+                    metric_names = ('Macro-R@1', 'AURC')
                 else:
                     metric_names = sorted(set(group.metric))
                 row['n_units'] = int(group.unit.nunique())
@@ -1181,14 +1284,162 @@ def get_df_ids(df_type, dataset_name):
     elif (df_type ==1)and('harth' in dataset_name.lower()):
         return [i for i in range(22)]
     
+def compare_alignment_methods(results, paired_test='wilcoxon'):
+    """Predefined within-source paired subject tests of the alignment hypotheses.
+
+    Holm correction is performed within each dataset (one invocation),
+    finetuning regime, physiological head and metric across the four contrasts.
+    The main contrast is D vs E, controlling for HAR-entropy calibration.
+    """
+    from scipy.stats import wilcoxon, ttest_rel
+    long = per_unit_metrics_df(results)
+    sub = long[long.study == 'classification']
+    output = []
+    contrasts = (
+        ('B_vs_A', 'logistic_hr', ''),
+        ('D_vs_E', 'fusion', 'logistic_har_entropy'),
+        ('D_vs_B', 'fusion', 'logistic_hr'),
+        ('D_vs_C', 'fusion', 'har_entropy'),
+    )
+    for regime, reg_data in results.get('classification', {}).items():
+        sources = sorted({m.split('/')[0] for m in
+                          _classification_method_units(reg_data)
+                          if '/' in m})
+        for source in sources:
+            for metric in ('AURC',):
+                relevant = sub[(sub.finetuning == regime) & (sub.metric == metric)]
+                wide = relevant.pivot_table(index='unit', columns='method',
+                                            values='value', aggfunc='first')
+                for label, left, right in contrasts:
+                    a = source + '/' + left if left else source
+                    b = source + '/' + right if right else source
+                    if a not in wide.columns or b not in wide.columns:
+                        continue
+                    paired = wide[[a, b]].dropna()
+                    if len(paired) < 3:
+                        continue
+                    delta = paired[a].to_numpy() - paired[b].to_numpy()
+                    if np.all(delta == 0):
+                        stat, p = 0., 1.
+                    elif paired_test == 'paired_t':
+                        t = ttest_rel(paired[a], paired[b]); stat, p = t.statistic, t.pvalue
+                    else:
+                        t = wilcoxon(delta, alternative='two-sided'); stat, p = t.statistic, t.pvalue
+                    output.append({
+                        'finetuning': regime, 'upstream_head': source,
+                        'metric': metric, 'contrast': label, 'method_a': a,
+                        'method_b': b, 'n_pairs': len(paired),
+                        'mean_a': float(paired[a].mean()),
+                        'mean_b': float(paired[b].mean()),
+                        'mean_difference_a_minus_b': float(delta.mean()),
+                        'test': paired_test, 'statistic': float(stat), 'p': float(p),
+                    })
+    out = pd.DataFrame(output)
+    if len(out):
+        out['p_holm'] = np.nan
+        for _, ids in out.groupby(['finetuning', 'upstream_head', 'metric']).groups.items():
+            out.loc[ids, 'p_holm'] = _holm_adjust(out.loc[ids, 'p'].values)
+    return out
+
+
+
+def compare_aurc_to_random(results, min_subjects=3):
+    """One-sided subject-paired AURC < R_all tests, with Holm adjustment.
+
+    Each held-out subject contributes a single delta = R_all - AURC.
+    Positive delta means lower selective risk than random rejection.
+    Holm families are (study, finetuning, upstream_head) WITHIN this dataset:
+      * classification: A/B/C/D/E within the same upstream HR head;
+      * retrieval: all reported uncertainty heads for the regime.
+
+    These are additional tests, independent of the A/B/C/D/E pairwise contrasts.
+    No window is treated as an independent statistical replicate.
+    """
+    from scipy.stats import wilcoxon
+
+    rows = []
+
+    def add_one(study, regime, upstream_head, method, subject_metrics):
+        paired = []
+        for subject, metrics in subject_metrics.items():
+            if not isinstance(metrics, dict) or 'AURC' not in metrics:
+                continue
+            if 'R_all' not in metrics or metrics['R_all'] is None:
+                raise ValueError(
+                    f'Missing R_all for {study}/{regime}/{method}/subject={subject}. '
+                    'R_all is the held-out error rate and cannot be reconstructed '
+                    'from AURC or macro-F1. Re-evaluate this subject with the '
+                    'updated pipeline before running random-baseline tests.'
+                )
+            try:
+                aurc = float(metrics['AURC'])
+                baseline = float(metrics['R_all'])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f'Non-numeric AURC/R_all for {regime}/{method}/{subject}') from exc
+            if not (np.isfinite(aurc) and np.isfinite(baseline)):
+                continue
+            paired.append((baseline, aurc))
+
+        if not paired:
+            return
+        arr = np.asarray(paired, dtype=float)
+        delta = arr[:, 0] - arr[:, 1]
+        n = len(delta)
+        if n < min_subjects:
+            statistic = p = float('nan')
+        elif np.allclose(delta, 0., atol=1e-14, rtol=0):
+            statistic, p = 0., 1.
+        else:
+            test = wilcoxon(delta, alternative='greater', zero_method='wilcox')
+            statistic, p = float(test.statistic), float(test.pvalue)
+        rows.append({
+            'study': study,
+            'finetuning': regime,
+            'upstream_head': upstream_head,
+            'method': method,
+            'n_subjects': n,
+            'mean_R_all': float(arr[:, 0].mean()),
+            'mean_AURC': float(arr[:, 1].mean()),
+            'mean_gain_R_all_minus_AURC': float(delta.mean()),
+            'n_beneficial': int(np.sum(delta > 0)),
+            'test': 'one-sided paired Wilcoxon',
+            'p': p,
+        })
+
+    for regime, regime_methods in results.get('zero_shot', {}).items():
+        for method, results_for_head in regime_methods.items():
+            add_one('zero_shot', regime, 'retrieval', method,
+                    results_for_head.get('by_subject', {}))
+
+    for regime, regime_results in results.get('classification', {}).items():
+        for method, subject_metrics in _classification_method_units(regime_results).items():
+            upstream_head = str(method).split('/', 1)[0]
+            add_one('classification', regime, upstream_head, method, subject_metrics)
+
+    cols = ('study', 'finetuning', 'upstream_head', 'method', 'n_subjects',
+            'mean_R_all', 'mean_AURC', 'mean_gain_R_all_minus_AURC',
+            'n_beneficial', 'test', 'p', 'p_holm')
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=cols)
+    out['p_holm'] = np.nan
+    for _, ids in out.groupby(['study', 'finetuning', 'upstream_head']).groups.items():
+        out.loc[ids, 'p_holm'] = _holm_adjust(out.loc[ids, 'p'].to_numpy(dtype=float))
+    return out.loc[:, cols]
+
 def export_statistical_results(results_dict, dataset_name):
-    """Export only R@1, R-AUROC, and F1 results with paired statistical tests."""
+    """Export Macro-R@1, macro-F1, and AURC with subject-paired tests."""
+    Path('downstream_results').mkdir(parents=True, exist_ok=True)
     classification_df, zero_shot_df = summarize_results_df(results_dict)
-    classification_df.to_csv(f'classification_df_{dataset_name}.csv')
-    zero_shot_df.to_csv(f'zero_shot_df_{dataset_name}.csv')
+    classification_df.to_csv(f'downstream_results/classification_df_{dataset_name}.csv')
+    zero_shot_df.to_csv(f'downstream_results/zero_shot_df_{dataset_name}.csv')
     omnibus, posthoc = compare_paired_results(results_dict)
-    omnibus.to_csv(f'omnibus_tests_{dataset_name}.csv', index=False)
-    posthoc.to_csv(f'posthoc_holm_{dataset_name}.csv', index=False)
+    omnibus.to_csv(f'downstream_results/omnibus_tests_{dataset_name}.csv', index=False)
+    posthoc.to_csv(f'downstream_results/posthoc_holm_{dataset_name}.csv', index=False)
+    compare_alignment_methods(results_dict).to_csv(
+        f'downstream_results/alignment_pairwise_holm_{dataset_name}.csv', index=False)
+    compare_aurc_to_random(results_dict).to_csv(
+        f'downstream_results/aurc_vs_random_{dataset_name}.csv', index=False)
 
 
 def run_downstream_pipeline():
@@ -1225,6 +1476,8 @@ def run_downstream_pipeline():
     parser.add_argument('--dataset-root', type=str, default=None)
     parser.add_argument('--analyze-json', type=str, default=None)
     parser.add_argument('--reuse-classification-json', type=str, default=None)
+    parser.add_argument('--alignment-inner-folds', type=int, default=2,
+                        help='Subject-grouped inner OOF folds, default 2')
     args = parser.parse_args()
     dataset_name = args.dataset_name
 
@@ -1257,11 +1510,17 @@ def run_downstream_pipeline():
             prior_results = json.load(handle)
         if not prior_results.get('classification'):
             raise ValueError('Saved JSON has no classification section to reuse')
+        if 'alignment_protocol' not in prior_results:
+            raise ValueError('Saved classification results predate the alignment '
+                             'experiment. Run without --reuse-classification-json '
+                             'to fit logistic models using subject-grouped OOF data.')
         if dataset_type == 0:
             validate_loso_classification_results(prior_results, users_ids)
         print('Reusing classification results; verify subjects and checkpoints match.')
 
-    results = DownstreamUncertainty(args.dataset_root, users_ids, dataset_type)
+    results = DownstreamUncertainty(
+        args.dataset_root, users_ids, dataset_type,
+        alignment_inner_folds=args.alignment_inner_folds)
     should_train_probe = prior_results is None
     results.make_0_finetuned_results(run_linear_probe=should_train_probe)
 
@@ -1284,8 +1543,13 @@ def run_downstream_pipeline():
             regime: _clean_classification_structure(values)
             for regime, values in prior_results['classification'].items()
         }
-    output_json = (f'results_{dataset_name}_statistical.json'
-                   if prior_results is not None else f'results_{dataset_name}.json')
+        # Classification scores are reused, so retain the calibration audit.
+        results.results['alignment_parameters'] = prior_results.get(
+            'alignment_parameters', {})
+        results.results['alignment_protocol'] = prior_results['alignment_protocol']
+    Path('downstream_results').mkdir(parents=True, exist_ok=True)
+    output_json = (f'downstream_results/results_{dataset_name}_statistical.json'
+                   if prior_results is not None else f'downstream_results/results_{dataset_name}.json')
     save_json(results.results, output_json)
     export_statistical_results(results.results, dataset_name)
 
