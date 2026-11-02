@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Plot mean Macro-R@1 versus mean classification macro-F1 from HAR results JSONs.
 
 Examples
@@ -30,6 +31,8 @@ Publication PNG/PDF figures and a CSV containing the subject-level mean,
 sample SD, n and aggregation unit for Macro-R@1 and macro-F1.
 Output filenames retain the legacy r1_vs_macro_f1 prefix for compatibility.
 """
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -289,8 +292,12 @@ def plot_dataset_panels(by_dataset, outstem):
     Each panel shows its own tick numbers and axis labels. The horizontal
     coordinate is the mean of subject-level Macro-R@1 scores.
     """
-    fig, axes = plt.subplots(2, 3, figsize=(12.8, 7.4), sharex=True, sharey=True)
-    axs = list(axes.flat)
+    fig = plt.figure(figsize=(14.1, 9.0))
+    # Same centered 3+2 panel positions as the optimized reference figure.
+    gs = fig.add_gridspec(2, 6, left=.070, right=.987, top=.965,
+                          bottom=.24, wspace=.68, hspace=.34)
+    positions = [gs[0, 0:2], gs[0, 2:4], gs[0, 4:6],
+                 gs[1, 1:3], gs[1, 3:5]]
     rows = [r for group in by_dataset.values() for r in group]
     (xmin, xmax), (ymin, ymax) = _axis_limits(rows, mean_only=True)
     xpad = (xmax - xmin) * 0.03
@@ -298,11 +305,8 @@ def plot_dataset_panels(by_dataset, outstem):
     limits = (max(0, xmin-xpad), min(1, xmax+xpad),
               max(0, ymin-ypad), min(1, ymax+ypad))
 
-    dataset_items = list(by_dataset.items())
-    panel_positions = [0, 1, 2, 3, 4]
-
-    for (dataset, group), pos in zip(dataset_items, panel_positions):
-        ax = axs[pos]
+    for (dataset, group), position in zip(by_dataset.items(), positions):
+        ax = fig.add_subplot(position)
         ax.set_axisbelow(True)
         ax.grid(True, color='#D6D6D6', linewidth=0.6, alpha=0.78)
         for depth in (100, 25, 0):
@@ -326,8 +330,6 @@ def plot_dataset_panels(by_dataset, outstem):
         ax.tick_params(labelsize=9, direction='out', labelleft=True, labelbottom=True)
         ax.set_xlabel('mean Macro-R@1', fontsize=10)
         ax.set_ylabel('mean macro-F1', fontsize=10)
-    legax = axs[-1]
-    legax.axis('off')
     legend_handles = [Line2D([], [], marker=style['marker'], linestyle='None',
                              markerfacecolor=style['color'], markeredgecolor='white',
                              markeredgewidth=.8, color='none', markersize=9,
@@ -337,25 +339,31 @@ def plot_dataset_panels(by_dataset, outstem):
                                  markerfacecolor=ORIGINAL['color'], markeredgecolor='white',
                                  markeredgewidth=.8, color='none', markersize=10,
                                  label='Original encoder (0%)'))
-    legax.legend(handles=legend_handles, loc='upper left', frameon=False,
-                 title='Encoder / HR objective', title_fontsize=11,
-                 fontsize=10, borderaxespad=0)
-    legax.text(.0, .36,
-               'Small markers: 25% fine-tuning\n'
-               'Large markers: 100% fine-tuning\n'
-               'Star: original encoder (0%)',
-               transform=legax.transAxes, ha='left', va='top',
-               fontsize=10, linespacing=1.45)
-    fig.subplots_adjust(left=.07, bottom=.08, right=.985, top=.965,
-                        wspace=.28, hspace=.28)
+    fig.legend(handles=legend_handles, loc='lower center',
+               bbox_to_anchor=(.5, .128), ncol=4, frameon=False,
+               title='Encoder / HR objective', title_fontsize=11,
+               fontsize=10, borderaxespad=0)
+    fig.text(.5, .03,
+             'Small markers: 25% fine-tuning   |   '
+             'Large markers: 100% fine-tuning   |   '
+             'Star: original encoder (0%)',
+             ha='center', va='bottom', fontsize=10)
     for ext in ('png', 'pdf'):
         fig.savefig(str(outstem) + '.' + ext, dpi=350, facecolor='white')
     plt.close(fig)
 
 
 def main():
+    default_json_paths = [
+        Path("downstream_results/capture24/results_capture24.json"),
+        Path("downstream_results/harth/results_harth.json"),
+        Path("downstream_results/pamap2/results_pamap.json"),
+        Path("downstream_results/realworld/results_realworld.json"),
+        Path("downstream_results/usc/results_usc.json"),
+    ]
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("json_paths", nargs="+", type=Path)
+    parser.add_argument("json_paths", nargs="*", type=Path, default=default_json_paths)
     parser.add_argument("--output-dir", type=Path, default=Path("figures"))
     parser.add_argument("--single-panel", action="store_true", help="Also generate the original all-in-one axes version")
     args = parser.parse_args()
