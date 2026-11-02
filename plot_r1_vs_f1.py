@@ -245,8 +245,8 @@ def plot_combined(by_dataset, outstem, *, group_envelopes=False):
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     ax.xaxis.set_major_formatter(FormatStrFormatter('%.2f'))
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
-    ax.set_xlabel('Embedding quality, mean Macro-R@1')
-    ax.set_ylabel('Classification, mean macro-F1')
+    ax.set_xlabel('Embedding quality, Macro-R@1')
+    ax.set_ylabel('Classification, macro-F1')
 
     # Two compact, non-overlapping legends, no labels on dots.
     method_handles = [
@@ -282,8 +282,58 @@ def plot_combined(by_dataset, outstem, *, group_envelopes=False):
              ha='left', va='bottom', fontsize=8.2)
     fig.subplots_adjust(left=.10, right=.73, bottom=.15, top=.965)
     for ext in ('png', 'pdf'):
-        fig.savefig(str(outstem) + '.' + ext, dpi=350, facecolor='white')
+        fig.savefig(str(outstem) + '.' + ext, dpi=350, facecolor='white', transparent=True)
     plt.close(fig)
+
+
+
+def _nonoverlapping_marker_positions(ax, group, margin_pt=1.5):
+    """Spread colliding markers slightly in display space (points, not data units).
+
+    Return shifted *plotting* positions and the shift in typographic points.
+    The underlying values in `group` (and the output CSV) are never changed.
+    Use lines back to the real coordinates when drawing displaced markers.
+    """
+    if not group:
+        return np.empty((0, 2)), np.empty((0,))
+
+    original = np.asarray([(r['macro_r1_mean'], r['macro_f1_mean'])
+                           for r in group], dtype=float)
+    # Convert to physical plotting units so the result is independent of
+    # the x/y data ranges, axis aspect ratio, and figure DPI.
+    points_pt = ax.transData.transform(original) * 72.0 / ax.figure.dpi
+    radius_pt = np.asarray([np.sqrt(AREA[r['finetune_pct']]) / 2 + 1.0
+                            for r in group], dtype=float)
+    shifts = np.zeros_like(points_pt)
+
+    # Iterative symmetric repulsion is deterministic, handles groups of 3+
+    # overlapping markers, and leaves isolated markers exactly in place.
+    for _ in range(180):
+        clashes = 0
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                delta = (points_pt[j] + shifts[j]) - (points_pt[i] + shifts[i])
+                distance = float(np.linalg.norm(delta))
+                needed = radius_pt[i] + radius_pt[j] + margin_pt
+                if distance >= needed - 0.02:
+                    continue
+                clashes += 1
+                if distance < 1e-7:
+                    # Stable direction for genuinely identical data points.
+                    angle = ((i + 1) * 1.618 + (j + 1) * .618) * np.pi
+                    direction = np.array([np.cos(angle), np.sin(angle)])
+                else:
+                    direction = delta / distance
+                push = (needed - distance + .03) / 2
+                shifts[i] -= direction * push
+                shifts[j] += direction * push
+        if not clashes:
+            break
+
+    moved_in_pixels = ax.transData.transform(original) + shifts * ax.figure.dpi / 72.0
+    shifted_positions = ax.transData.inverted().transform(moved_in_pixels)
+    distances_pt = np.linalg.norm(shifts, axis=1)
+    return shifted_positions, distances_pt
 
 
 def plot_dataset_panels(by_dataset, outstem):
@@ -292,10 +342,10 @@ def plot_dataset_panels(by_dataset, outstem):
     Each panel shows its own tick numbers and axis labels. The horizontal
     coordinate is the mean of subject-level Macro-R@1 scores.
     """
-    fig = plt.figure(figsize=(14.1, 9.0))
-    # Same centered 3+2 panel positions as the optimized reference figure.
+    fig = plt.figure(figsize=(14.1, 7.4))
+    # Compact centered 3+2 layout with the shared legend below the panels.
     gs = fig.add_gridspec(2, 6, left=.070, right=.987, top=.965,
-                          bottom=.24, wspace=.68, hspace=.34)
+                          bottom=.195, wspace=.50, hspace=.20)
     positions = [gs[0, 0:2], gs[0, 2:4], gs[0, 4:6],
                  gs[1, 1:3], gs[1, 3:5]]
     rows = [r for group in by_dataset.values() for r in group]
@@ -308,28 +358,42 @@ def plot_dataset_panels(by_dataset, outstem):
     for (dataset, group), position in zip(by_dataset.items(), positions):
         ax = fig.add_subplot(position)
         ax.set_axisbelow(True)
-        ax.grid(True, color='#D6D6D6', linewidth=0.6, alpha=0.78)
+        ax.grid(True, color="#D6D6D671", linewidth=1, alpha=1)
+        # Set fixed axis limits BEFORE calculating overlap in display units.
+        ax.set_xlim(limits[:2])
+        ax.set_ylim(limits[2:])
+        shifted, distances_pt = _nonoverlapping_marker_positions(ax, group)
+
+        # Show the true positions by a fine leader line whenever a marker
+        # had to move. Points that do not collide stay at their exact values.
+        for r, (px, py), moved_pt in zip(group, shifted, distances_pt):
+            if moved_pt > .75:
+                ax.plot([r['macro_r1_mean'], px], [r['macro_f1_mean'], py],
+                        color='#777777', linewidth=.75, alpha=.65,
+                        solid_capstyle='round', zorder=2)
+                ax.plot(r['macro_r1_mean'], r['macro_f1_mean'],
+                        marker='.', markersize=2.5, color='#777777',
+                        alpha=.8, linestyle='None', zorder=3)
+
         for depth in (100, 25, 0):
-            for r in group:
+            for r, (px, py) in zip(group, shifted):
                 if r['finetune_pct'] != depth:
                     continue
                 style = ORIGINAL if depth == 0 else METHODS[r['method']]
-                ax.scatter(r['macro_r1_mean'], r['macro_f1_mean'],
+                ax.scatter(px, py,
                            c=style['color'], s=AREA[depth],
                            marker=style['marker'], edgecolors='white',
                            linewidths=.9, zorder=6 if depth == 0 else (5 if depth == 25 else 4))
         ax.text(0.03, 0.95, dataset, transform=ax.transAxes,
                 ha='left', va='top', fontsize=11, weight='bold',
                 bbox=dict(facecolor='white', edgecolor='none', alpha=0.78, pad=1.5))
-        ax.set_xlim(limits[:2])
-        ax.set_ylim(limits[2:])
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
         ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
         ax.xaxis.set_major_formatter(FormatStrFormatter('%.2f'))
         ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
         ax.tick_params(labelsize=9, direction='out', labelleft=True, labelbottom=True)
-        ax.set_xlabel('mean Macro-R@1', fontsize=10)
-        ax.set_ylabel('mean macro-F1', fontsize=10)
+        ax.set_xlabel('Macro-R@1', fontsize=10)
+        ax.set_ylabel('macro-F1', fontsize=10)
     legend_handles = [Line2D([], [], marker=style['marker'], linestyle='None',
                              markerfacecolor=style['color'], markeredgecolor='white',
                              markeredgewidth=.8, color='none', markersize=9,
@@ -340,12 +404,12 @@ def plot_dataset_panels(by_dataset, outstem):
                                  markeredgewidth=.8, color='none', markersize=10,
                                  label='Original encoder (0%)'))
     fig.legend(handles=legend_handles, loc='lower center',
-               bbox_to_anchor=(.5, .128), ncol=4, frameon=False,
-               title='Encoder / HR objective', title_fontsize=11,
+               bbox_to_anchor=(.5, .07), ncol=4, frameon=False,
+               title='', title_fontsize=11,
                fontsize=10, borderaxespad=0)
-    fig.text(.5, .03,
-             'Small markers: 25% fine-tuning   |   '
-             'Large markers: 100% fine-tuning   |   '
+    fig.text(.5, .035,
+             'Small markers: 25% fine-tuning     '
+             'Large markers: 100% fine-tuning     '
              'Star: original encoder (0%)',
              ha='center', va='bottom', fontsize=10)
     for ext in ('png', 'pdf'):
