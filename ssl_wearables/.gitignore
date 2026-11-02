@@ -16,7 +16,7 @@ data/*
 # intermediate files
 *.log
 *.pt
-*.mdl
+#*.mdl
 *.png
 *.ipynb
 

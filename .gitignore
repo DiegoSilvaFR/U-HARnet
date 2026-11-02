@@ -82,7 +82,7 @@ secrets.json
 *.h5
 *.hdf5
 *.onnx
-*.mdl
+#*.mdl
 *.joblib
 *.pkl
 *.pickle
@@ -101,6 +101,7 @@ secrets.json
 *.tar
 *.tar.gz
 *.7z
+*.parquet
 
 # =========================
 # Experiment Outputs
