@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Plot mean R@1 versus mean classification macro-F1 from HAR results JSONs.
+"""Plot mean Macro-R@1 versus mean classification macro-F1 from HAR results JSONs.
 
 Examples
 --------
@@ -9,7 +8,7 @@ python plot_r1_vs_f1.py results_capture24.json results_harth.json \
 
 Input layout (no conversion needed)
 -----------------------------------
-zero_shot.finetuned_{depth}_results.{method}.by_subject.{user}.R@1
+zero_shot.finetuned_{depth}_results.{method}.by_subject.{user}.Macro-R@1
 classification.finetuned_0_results.{evaluation_id}.{method}.macro_f1
 classification.finetuned_{25,100}_results.{method}.{evaluation_id}.macro_f1
 
@@ -22,17 +21,15 @@ marker outlines identify each dataset, and size encodes fine-tuning depth.
 An additional figure uses faint, unfilled grouping envelopes.
 No per-point labels or error bars on either combined plot.
 Individual dataset figures retain the old method-color styling.
-CAPTURE-24 has subject-level R@1 but fold-level classification macro-F1;
-these are calculated separately over their own native evaluation units.
+Retrieval uses per-subject Macro-R@1. Classification macro-F1 uses its own
+LOSO evaluation units. Means and sample SDs are computed independently.
 
 Outputs
 -------
-One clean combined PDF/PNG using dataset-colored marker outlines,
-one optional combined PDF/PNG with dashed convex-hull group envelopes,
-and one CSV with the mean, SD, n, and aggregation unit of each coordinate.
+Publication PNG/PDF figures and a CSV containing the subject-level mean,
+sample SD, n and aggregation unit for Macro-R@1 and macro-F1.
+Output filenames retain the legacy r1_vs_macro_f1 prefix for compatibility.
 """
-from __future__ import annotations
-
 import argparse
 import csv
 import json
@@ -106,8 +103,8 @@ def extract_summary(data: dict, dataset: str, source_file: str = ""):
         for method, retrieval, f1_by_id in configurations:
             r1_by_id = retrieval.get("by_subject")
             if not isinstance(r1_by_id, dict):
-                raise ValueError("%s %s%% %s missing by_subject R@1" % (dataset, depth, method))
-            xm, xs, nx = _stats(r1_by_id, "R@1", "%s/%s/%s/retrieval" % (dataset, depth, method))
+                raise ValueError("%s %s%% %s missing by_subject Macro-R@1" % (dataset, depth, method))
+            xm, xs, nx = _stats(r1_by_id, "Macro-R@1", "%s/%s/%s/retrieval" % (dataset, depth, method))
             ym, ys, ny = _stats(f1_by_id, "macro_f1", "%s/%s/%s/classification" % (dataset, depth, method))
             y_unit = "subject" if set(f1_by_id) == set(r1_by_id) else "evaluation fold / split"
             rows.append({
@@ -115,7 +112,7 @@ def extract_summary(data: dict, dataset: str, source_file: str = ""):
                 "method": method,
                 "method_label": ORIGINAL["label"] if depth == 0 else METHODS[method]["label"],
                 "finetune_pct": depth,
-                "r1_mean": xm, "r1_sd": xs, "n_r1": nx, "r1_unit": "subject",
+                "macro_r1_mean": xm, "macro_r1_sd": xs, "n_macro_r1": nx, "macro_r1_unit": "subject",
                 "macro_f1_mean": ym, "macro_f1_sd": ys, "n_macro_f1": ny, "macro_f1_unit": y_unit,
                 "source_file": source_file,
             })
@@ -135,10 +132,10 @@ def configure_style():
 
 def _axis_limits(rows, mean_only=False):
     if mean_only:
-        xx = [r["r1_mean"] for r in rows]
+        xx = [r["macro_r1_mean"] for r in rows]
         yy = [r["macro_f1_mean"] for r in rows]
     else:
-        xx = [q for r in rows for q in (r["r1_mean"] - r["r1_sd"], r["r1_mean"] + r["r1_sd"])]
+        xx = [q for r in rows for q in (r["macro_r1_mean"] - r["macro_r1_sd"], r["macro_r1_mean"] + r["macro_r1_sd"])]
         yy = [q for r in rows for q in (r["macro_f1_mean"] - r["macro_f1_sd"], r["macro_f1_mean"] + r["macro_f1_sd"])]
     dx = max(max(xx) - min(xx), 0.02)
     dy = max(max(yy) - min(yy), 0.03)
@@ -196,7 +193,7 @@ def plot_combined(by_dataset, outstem, *, group_envelopes=False):
         # Convex hull in axis-normalized coordinates. Offset by 1.8% of the
         # plotting size to keep the outline away from each marker.
         for dataset, group in by_dataset.items():
-            points = [((r['r1_mean']-xmin)/(xmax-xmin),
+            points = [((r['macro_r1_mean']-xmin)/(xmax-xmin),
                        (r['macro_f1_mean']-ymin)/(ymax-ymin)) for r in group]
             hull = _convex_hull_vertices(points)
             if len(hull) < 3:
@@ -222,7 +219,7 @@ def plot_combined(by_dataset, outstem, *, group_envelopes=False):
     for r in rows:
         d = r['finetune_pct']
         st = ORIGINAL if d == 0 else METHODS[r['method']]
-        x, y, marker = r['r1_mean'], r['macro_f1_mean'], st['marker']
+        x, y, marker = r['macro_r1_mean'], r['macro_f1_mean'], st['marker']
         dataset_color = DATASET_COLORS[r['dataset']]
         size = AREA[d]
         # Long points on the star need a stronger outer colored silhouette.
@@ -245,7 +242,7 @@ def plot_combined(by_dataset, outstem, *, group_envelopes=False):
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     ax.xaxis.set_major_formatter(FormatStrFormatter('%.2f'))
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
-    ax.set_xlabel('Embedding quality, mean R@1')
+    ax.set_xlabel('Embedding quality, mean Macro-R@1')
     ax.set_ylabel('Classification, mean macro-F1')
 
     # Two compact, non-overlapping legends, no labels on dots.
@@ -289,13 +286,13 @@ def plot_combined(by_dataset, outstem, *, group_envelopes=False):
 def plot_dataset_panels(by_dataset, outstem):
     """One publication figure with five dataset panels and one shared legend.
 
-    Every panel shows its own tick numbers and axis labels, per user request.
+    Each panel shows its own tick numbers and axis labels. The horizontal
+    coordinate is the mean of subject-level Macro-R@1 scores.
     """
     fig, axes = plt.subplots(2, 3, figsize=(12.8, 7.4), sharex=True, sharey=True)
     axs = list(axes.flat)
     rows = [r for group in by_dataset.values() for r in group]
     (xmin, xmax), (ymin, ymax) = _axis_limits(rows, mean_only=True)
-
     xpad = (xmax - xmin) * 0.03
     ypad = (ymax - ymin) * 0.04
     limits = (max(0, xmin-xpad), min(1, xmax+xpad),
@@ -308,21 +305,18 @@ def plot_dataset_panels(by_dataset, outstem):
         ax = axs[pos]
         ax.set_axisbelow(True)
         ax.grid(True, color='#D6D6D6', linewidth=0.6, alpha=0.78)
-
         for depth in (100, 25, 0):
             for r in group:
                 if r['finetune_pct'] != depth:
                     continue
                 style = ORIGINAL if depth == 0 else METHODS[r['method']]
-                ax.scatter(r['r1_mean'], r['macro_f1_mean'],
+                ax.scatter(r['macro_r1_mean'], r['macro_f1_mean'],
                            c=style['color'], s=AREA[depth],
                            marker=style['marker'], edgecolors='white',
                            linewidths=.9, zorder=6 if depth == 0 else (5 if depth == 25 else 4))
-
         ax.text(0.03, 0.95, dataset, transform=ax.transAxes,
                 ha='left', va='top', fontsize=11, weight='bold',
                 bbox=dict(facecolor='white', edgecolor='none', alpha=0.78, pad=1.5))
-
         ax.set_xlim(limits[:2])
         ax.set_ylim(limits[2:])
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
@@ -330,9 +324,8 @@ def plot_dataset_panels(by_dataset, outstem):
         ax.xaxis.set_major_formatter(FormatStrFormatter('%.2f'))
         ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
         ax.tick_params(labelsize=9, direction='out', labelleft=True, labelbottom=True)
-        ax.set_xlabel('mean R@1', fontsize=10)
+        ax.set_xlabel('mean Macro-R@1', fontsize=10)
         ax.set_ylabel('mean macro-F1', fontsize=10)
-
     legax = axs[-1]
     legax.axis('off')
     legend_handles = [Line2D([], [], marker=style['marker'], linestyle='None',
@@ -353,7 +346,6 @@ def plot_dataset_panels(by_dataset, outstem):
                'Star: original encoder (0%)',
                transform=legax.transAxes, ha='left', va='top',
                fontsize=10, linespacing=1.45)
-
     fig.subplots_adjust(left=.07, bottom=.08, right=.985, top=.965,
                         wspace=.28, hspace=.28)
     for ext in ('png', 'pdf'):
