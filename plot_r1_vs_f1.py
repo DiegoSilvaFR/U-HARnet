@@ -285,8 +285,6 @@ def plot_combined(by_dataset, outstem, *, group_envelopes=False):
         fig.savefig(str(outstem) + '.' + ext, dpi=350, facecolor='white', transparent=True)
     plt.close(fig)
 
-
-
 def _nonoverlapping_marker_positions(ax, group, margin_pt=1.5):
     """Spread colliding markers slightly in display space (points, not data units).
 
