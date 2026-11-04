@@ -379,6 +379,7 @@ def make_heatmap(records: list[dict], row_layout: list[tuple], dataset_names: li
 
 
 def main(argv=None):
+    
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("json_paths", nargs="*", type=Path,
