@@ -476,9 +476,10 @@ def make_heatmap(records: list[dict], row_layout: list[tuple], dataset_names: li
                     ax.text(j, yc, label, ha="center", va="center",
                             fontsize=7.7, color=color)
                 if show_significance and sig[i, j] and np.isfinite(value):
-                    dot = "white" if abs(value) >= limit * 0.56 else "#222222"
-                    ax.plot(j + 0.34, yc - 0.30, marker="o", markersize=2.4,
-                            color=dot, linestyle="none", zorder=5)
+                    # One style on every background: plain dark dot.
+                    ax.plot(j + 0.34, yc - 0.30, marker="o", markersize=3.2,
+                            markerfacecolor="#111111", markeredgecolor="#111111",
+                            markeredgewidth=0, linestyle="none", zorder=5)
 
         ax.set_xlim(-0.5, n_datasets - 0.5)
         ax.set_ylim(last_y + 0.5, -0.5)
