@@ -15,6 +15,7 @@ The code builds on the [OxWearables self-supervised wearable encoder](https://gi
 - [1. Reproduce upstream HR evaluation](#1-reproduce-upstream-hr-evaluation)
 - [2. Reproduce downstream HAR evaluation](#2-reproduce-downstream-har-evaluation)
 - [3. Evaluate a new HAR dataset](#3-evaluate-a-new-har-dataset)
+- [4. Information–alignment analysis (Theorem 1)](#4-informationalignment-analysis-theorem-1)
 - [Results and interpretation](#results-and-interpretation)
 - [Known issues and reproducibility notes](#known-issues-and-reproducibility-notes)
 - [Acknowledgments](#acknowledgments)
@@ -61,6 +62,10 @@ U-HARnet/
 ├── benchmark_upstream_finetuned.py # Fine-tuned HR checkpoint loading / inference
 ├── downstream_experiments.py       # Downstream retrieval, LOSO probe and statistics
 ├── linear_probe.py                 # HAR linear probe and cross-task alignment
+├── plot_aurc_improvement_heatmap.py # Fig. 4: relative AURC improvement + significance markers
+├── kappa_rho_analysis.py           # Theorem 1: information (kappa) / alignment (rho) estimation
+├── plot_information_alignment_map.py # kappa vs rho map
+├── run_pipeline.sh                 # All datasets + figures + kappa/rho analysis
 ├── plot_r1_vs_f1.py               # Representation-quality vs HAR-performance figure
 ├── plot_r_auroc_transfer.py       # Legacy R-AUROC plot (older result schema)
 ├── ssl_wearables/                  # Wearable encoder implementation and model assets
@@ -241,36 +246,57 @@ The downstream pipeline evaluates each dataset using the same 0%, 25% and 100% H
 4. **Cross-task alignment:** logistic error models fitted **only on the outer-LOSO training subjects**, using inner subject-grouped out-of-fold predictions (`GroupKFold`, default 2 folds).
 5. **Statistical comparisons:** paired subject-level tests, Holm adjustments, and comparison of AURC against each subject's full-coverage error rate (`R_all`).
 
-### Run an existing dataset
-
-From the repository root, after preparing the subject NPZ files and checkpoints:
+### Run everything
 
 ```bash
-# PAMAP2
+bash run_pipeline.sh                       # five datasets, Fig. 4, kappa/rho analysis and map
+DATASETS="harth usc" bash run_pipeline.sh  # a subset
+SKIP_DOWNSTREAM=1 bash run_pipeline.sh     # figures and analysis only (results already computed)
+```
+
+Logs are written to `logs/downstream_<dataset>.log`. Existing results in
+`downstream_results/<folder>/` are overwritten; commit or copy them first.
+
+### Run an existing dataset
+
+From the repository root, after preparing the subject NPZ files and checkpoints.
+`--output-dir` places all outputs where the plotting scripts expect them:
+
+```bash
+# PAMAP2 (files named pamap_subject_<id>_wrist.npz: '{}' marks the subject id)
 python downstream_experiments.py \
   --dataset-name pamap \
-  --dataset-root downstream_datasets/pamap2/pamap_subject_
+  --dataset-root "downstream_datasets/pamap2/pamap_subject_{}_wrist" \
+  --output-dir downstream_results/pamap2
 
 # USC-HAD
 python downstream_experiments.py \
   --dataset-name usc \
-  --dataset-root downstream_datasets/usc/usc_subject_
+  --dataset-root downstream_datasets/usc/usc_subject_ \
+  --output-dir downstream_results/usc
 
 # REALWORLD
 python downstream_experiments.py \
   --dataset-name realworld \
-  --dataset-root downstream_datasets/realworld/realworld_subject_
+  --dataset-root downstream_datasets/realworld/realworld_subject_ \
+  --output-dir downstream_results/realworld
 
 # HARTH
 python downstream_experiments.py \
   --dataset-name harth \
-  --dataset-root downstream_datasets/harth/harth_subject_
+  --dataset-root downstream_datasets/harth/harth_subject_ \
+  --output-dir downstream_results/harth
 
 # CAPTURE-24 (150 subjects)
 python downstream_experiments.py \
   --dataset-name capture24 \
-  --dataset-root downstream_datasets/capture24/capture24_subject_
+  --dataset-root downstream_datasets/capture24/capture24_subject_ \
+  --output-dir downstream_results/capture24
 ```
+
+`--dataset-root` is either a file prefix (`<root><id>.npz`) or a template with
+`{}` for the subject id (`<root with id>.npz`). Without `--output-dir`, outputs go
+to `downstream_results/` as before.
 
 To change the number of inner subject-grouped calibration folds:
 
@@ -320,7 +346,7 @@ Only reuse a previous JSON when the dataset, subjects, preprocessing, checkpoint
 
 ### Expected downstream outputs
 
-Files are written under `downstream_results/`:
+Files are written under `--output-dir` (default `downstream_results/`):
 
 ```text
 results_<dataset>.json
@@ -330,7 +356,36 @@ omnibus_tests_<dataset>.csv
 posthoc_holm_<dataset>.csv
 alignment_pairwise_holm_<dataset>.csv
 aurc_vs_random_<dataset>.csv
+windows/windows_<dataset>_ft0.parquet             # per-window held-out scores (0%)
+windows/windows_<dataset>_ft<25|100>_<head>.parquet
 ```
+
+The **per-window files** contain one row per held-out window of the LOSO linear
+probe: `subject`, `window` (position in the subject's recording), `y_true`,
+`y_pred`, `loss` (0/1 HAR error), `retrieval_loss` (0/1 nearest-neighbour error),
+`motion` (motion-intensity baseline: SD of the acceleration magnitude over the
+window, in g), `har_entropy` (C), `logistic_har_entropy` (E) and, per HR source,
+`<head>` (A), `<head>/logistic_hr` (B) and `<head>/fusion` (D). They are exactly
+the scores behind the AURC values in the JSON, so the subject-level AURC can be
+recomputed from them (verified to machine precision). If `pyarrow` is not
+installed they are written as `.csv.gz`. Use `--no-save-windows` to skip them.
+The motion score is stored for offline analysis only; it does not enter the
+logistic alignment/fusion models or any of the statistics CSVs above.
+
+### Fig. 4 with significance markers
+
+```bash
+python plot_aurc_improvement_heatmap.py --output-dir figures
+```
+
+A dot in the upper-right corner of a cell marks an improvement over random
+rejection that is significant after Holm correction (one-sided paired Wilcoxon,
+AURC < `R_all`, `p_Holm < 0.05`), read from `aurc_vs_random_<dataset>.csv` next to
+each results JSON (Holm families: regime × HR head, over A–E). The values are
+unchanged. `--no-significance` removes the dots; `--alpha` changes the level. The
+summary CSV gains `p_holm_vs_random` and `significant_vs_random` columns. With
+five subjects, no PAMAP2 cell can reach significance (minimum one-sided exact
+Wilcoxon p = 1/32).
 
 The JSON preserves per-subject metrics, regression-head comparisons and alignment information. The CSV files contain summaries and tests. To regenerate the representation-quality plot from multiple results JSON files, see the metric-key compatibility note below:
 
@@ -453,6 +508,55 @@ python downstream_experiments.py \
 The code reads `my_subject_1.npz` through `my_subject_4.npz`, generates the 0% / 25% / 100% embedding and uncertainty results, evaluates global cosine retrieval and LOSO classification, and saves `downstream_results/results_mydataset.json` plus CSV reports.
 
 **For an unbiased comparison:** define the activity label set consistently before running, never mix test-subject windows into the classifier/calibration training folds, and report differences in sensor placement, label definitions and collection conditions. The pipeline's LOSO split controls subject-level classification leakage, but a new dataset may still differ materially from the Oxford training domain.
+
+## 4. Information–alignment analysis (Theorem 1)
+
+For any ranking score U and 0/1 loss L, the improvement over random rejection
+factorizes exactly as `Delta = R_all - AURC = rho * kappa`, with
+`kappa = SD(P(L=1 | U))` (**information**: how much the error rate varies with the
+score) and `rho = Corr(P(L=1 | U), ln W)` (**alignment**: whether higher scores point
+to more errors; `W` is the rank percentile). `kappa_rho_analysis.py` estimates both
+terms from the per-window files:
+
+```bash
+python kappa_rho_analysis.py                          # all windows under downstream_results/
+python kappa_rho_analysis.py --thin 3 --output-dir figures/kappa_rho_thin3     # dependence check
+python kappa_rho_analysis.py --bins 10 --output-dir figures/kappa_rho_bins10   # binning sensitivity
+python kappa_rho_analysis.py --loss retrieval_loss --output-dir figures/kappa_rho_retrieval
+python plot_information_alignment_map.py              # figures/information_alignment_map.pdf
+```
+
+Estimation, per held-out subject and then averaged over subjects (as in Fig. 4):
+
+| Quantity | Estimator |
+| --- | --- |
+| `Delta_s` | `R_all,s - AURC_s`, with the same tie-aware `compute_aurc` as the pipeline |
+| `V_s - C_s` | between-bin variance of error rates in equal-count score bins, minus its binomial-noise term; unbiased for the variance of the binned error-probability function |
+| bins | `auto`: `min(20, max(4, n_s // 25))` per subject (≥ ~25 windows per bin) |
+| `tau` | `mean_s (V_s - C_s) / R_all,s^2` (not truncated) — information test |
+| `kappa` | `sqrt(max(tau, 0))`, relative to `R_all` |
+| `rho` | `mean_s(Delta_s / R_all,s) / kappa`; reported only if information is detected |
+| CIs | percentile bootstrap over subjects (2,000 replicates) |
+
+Information is **detected** when the 95% CI of `tau` lies above zero. `rho` is a
+ratio, so read it with its CI: when `kappa` is small it is noisy and can exceed 1
+in magnitude even though `|rho| <= 1` in the population.
+
+`conditional_information.csv` reports whether a score carries error information
+**beyond** another one, `E[Var(P(L | U, C) | C)] / R_all^2`, estimated with score bins
+nested within bins of `C` (3×3 per subject below 1,500 windows, 5×5 above):
+
+* `hr_beyond_motion` — is HR uncertainty more than a movement-intensity proxy?
+  (plus a paired Wilcoxon test of subject-level AURC, HR vs motion, Holm within
+  dataset × regime);
+* `hr_beyond_entropy` — Corollary 2: can fusion with entropy help at all?
+* `motion_beyond_entropy` — reference.
+
+Outputs (`figures/`): `kappa_rho_summary.csv` (one row per dataset × regime × head ×
+strategy, including `motion`), `conditional_information.csv`, and
+`information_alignment_map.{pdf,png}`. **Check:** in a run from fresh results,
+`100 * rel_delta` must reproduce Fig. 4; the script prints the maximum difference
+against `figures/aurc_relative_improvement_summary.csv` (≈ 0 expected).
 
 ## Results and interpretation
 

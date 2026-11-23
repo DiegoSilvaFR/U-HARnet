@@ -162,7 +162,7 @@ def _logistic_score(fitted, X):
 def train_test_linear_probe_with_alignment(
     X_train, X_test, y_train, y_test, u_train, u_test, train_user_ids,
     epochs=100, inner_folds=2, seed=21, method_names=None,
-    return_parameters=False,
+    return_parameters=False, return_window_scores=False,
 ):
     """Fit A/B/C/D/E per HR uncertainty source, on one outer LOSO split.
 
@@ -179,6 +179,14 @@ def train_test_linear_probe_with_alignment(
       <source>/logistic_har_entropy  E logistic entropy only
     Includes selective metrics on every score, and macro_f1 only on A (since
     the predicted class and macro-F1 are identical for the five scores).
+
+    With return_window_scores=True, a third (or second, without
+    return_parameters) element is returned: a dict of per-window arrays for
+    the held-out subject, aligned with X_test rows:
+      'y_pred', 'loss' (0/1 classification error), 'har_entropy' (C),
+      'logistic_har_entropy' (E), and for every source the keys
+      <source> (A), <source>/logistic_hr (B) and <source>/fusion (D).
+    These are exactly the scores used for the AURC values in the output.
     """
     X_train = np.asarray(X_train)
     X_test = np.asarray(X_test)
@@ -245,6 +253,12 @@ def train_test_linear_probe_with_alignment(
         'har_entropy': _logistic_coefficients(entropy_calibrator),
         'by_upstream_source': {},
     }
+    window_scores = {
+        'y_pred': np.asarray(test_pred),
+        'loss': np.asarray(test_error, dtype=np.int8),
+        'har_entropy': np.asarray(test_entropy, dtype=np.float64),
+        'logistic_har_entropy': np.asarray(aligned_entropy, dtype=np.float64),
+    }
     for column in u_train.columns:
         source = str(names[column])
         u_cal = np.asarray(u_train[column], dtype=np.float64).reshape(-1)
@@ -261,16 +275,22 @@ def train_test_linear_probe_with_alignment(
             'fusion': _logistic_coefficients(fusion_calibrator),
         }
         base = source + '/'
+        aligned_hr = _logistic_score(hr_calibrator, u_outer[:, None])
+        fused = _logistic_score(
+            fusion_calibrator, np.column_stack([u_outer, test_entropy]))
         output[source] = _selective_metrics(test_error, u_outer, macro_f1=macro_f1)
-        output[base + 'logistic_hr'] = _selective_metrics(
-            test_error, _logistic_score(hr_calibrator, u_outer[:, None]))
+        output[base + 'logistic_hr'] = _selective_metrics(test_error, aligned_hr)
         output[base + 'har_entropy'] = _selective_metrics(test_error, test_entropy)
-        output[base + 'fusion'] = _selective_metrics(
-            test_error, _logistic_score(
-                fusion_calibrator, np.column_stack([u_outer, test_entropy])))
+        output[base + 'fusion'] = _selective_metrics(test_error, fused)
         output[base + 'logistic_har_entropy'] = _selective_metrics(
             test_error, aligned_entropy)
-    return (output, parameters) if return_parameters else output
+        window_scores[source] = u_outer
+        window_scores[base + 'logistic_hr'] = np.asarray(aligned_hr, dtype=np.float64)
+        window_scores[base + 'fusion'] = np.asarray(fused, dtype=np.float64)
+    result = (output, parameters) if return_parameters else (output,)
+    if return_window_scores:
+        result = result + (window_scores,)
+    return result if len(result) > 1 else result[0]
 
 
 def train_test_linear_probe(X_train, X_test, y_train, y_test, u_test, epochs=20):

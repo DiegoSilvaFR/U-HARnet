@@ -6,20 +6,60 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from pathlib import Path
 
 from benchmark_upstream_heads import benchmark_heads, risk_coverage_curve_regression, EvalHeads
 from benchmark_upstream_finetuned import make_upstream_results, mc_dropout_finetuned_inference, load_HR_encoder, gaussian_regression_inference, student_t_head_inference
 from linear_probe import train_test_linear_probe_with_alignment, compute_aurc
 
 def _load_user(dataset_root_path, user):
-    
-    user_path = dataset_root_path + str(user)+'.npz'
+    """Load one subject. dataset_root_path is a file prefix
+    (e.g. 'downstream_datasets/usc/usc_subject_' -> usc_subject_3.npz) or a
+    template with '{}' for the subject id
+    (e.g. 'downstream_datasets/pamap2/pamap_subject_{}_wrist' -> pamap_subject_3_wrist.npz).
+    """
+    if '{}' in dataset_root_path:
+        user_path = dataset_root_path.format(user) + '.npz'
+    else:
+        user_path = dataset_root_path + str(user) + '.npz'
     with np.load(user_path) as data:
         y = data["y"]
         # Inference operates in float32; do not retain float64 ACC windows.
         X = np.asarray(data["X"], dtype=np.float32)
 
     return X, y
+
+
+def window_motion_intensity(X):
+    """Motion-intensity baseline: SD over time of the acceleration magnitude.
+
+    X has shape (N, 3, T) (channels first, as stored in the downstream .npz
+    files) or (N, T, 3). The magnitude sqrt(x^2 + y^2 + z^2) is orientation
+    invariant; its standard deviation over the window is 0 for a static
+    sensor and grows with movement intensity. Higher = more movement.
+    """
+    X = np.asarray(X, dtype=np.float32)
+    if X.ndim != 3:
+        raise ValueError(f'Expected windows (N, 3, T) or (N, T, 3), got {X.shape}')
+    channel_axis = 1 if X.shape[1] == 3 else 2 if X.shape[2] == 3 else None
+    if channel_axis is None:
+        raise ValueError(f'No 3-channel axis in windows of shape {X.shape}')
+    magnitude = np.sqrt(np.sum(np.square(X, dtype=np.float64), axis=channel_axis))
+    return magnitude.std(axis=1)
+
+
+def _write_window_table(frame, path_stem):
+    """Write per-window results as Parquet, falling back to gzipped CSV."""
+    path_stem = Path(path_stem)
+    path_stem.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target = path_stem.with_suffix('.parquet')
+        frame.to_parquet(target, index=False)
+    except (ImportError, ValueError):
+        target = path_stem.with_suffix('.csv.gz')
+        frame.to_csv(target, index=False, compression='gzip')
+    print('per-window results saved at:', target)
+    return target
 
 def _float32_feature_frame(df, feature_dim=1024):
     """Pack encoder features in a single float32 Pandas block.
@@ -55,6 +95,8 @@ def benchmark_downstream_heads(dataset_root_path, users):
         
         # 3 heads × N samples
         df_user = _float32_feature_frame(eval_heads.predict(X, return_feats=True))
+        # Motion-intensity baseline (not an uncertainty head; analysed offline).
+        df_user["motion"] = window_motion_intensity(X)
         del X
 
         # Repeat targets for each head
@@ -247,12 +289,14 @@ def make_finetuned_embedding(output_size, dataset_root_path, users, encoder_path
                     )
                 )
         else:
-            
+
             features, predicted_hr, hr_uncertainty = mc_dropout_finetuned_inference(encoder, X)
-             
- 
+
+
         # Keep the full feature matrix float32, not float64.
         df_user = pd.DataFrame(np.asarray(features, dtype=np.float32))
+        # Motion-intensity baseline (not an uncertainty head; analysed offline).
+        df_user["motion"] = window_motion_intensity(X)
         del X, features
 
         # uncertainty learned during upstream HR task
@@ -730,15 +774,24 @@ def retrieval_metrics_gpu(
 
 class DownstreamUncertainty:
     
-    def __init__(self, dataset_root, users_ids, dataset_type=1, alignment_inner_folds=2):
+    def __init__(self, dataset_root, users_ids, dataset_type=1, alignment_inner_folds=2,
+                 dataset_name='dataset', windows_dir=None):
         
         """ dataset_type: int 
         0: CAPTURE-24
         1: other
 
         Both use LOSO. Dataset type preserves the original epoch settings.
+
+        windows_dir: if given, every LOSO evaluation also saves one row per
+        held-out window (subject, labels, 0/1 errors, all ranking scores and
+        the motion-intensity baseline) to
+        <windows_dir>/windows_<dataset_name>_<regime>.parquet (or .csv.gz).
+        These files feed kappa_rho_analysis.py.
         """
         
+        self.dataset_name = dataset_name
+        self.windows_dir = Path(windows_dir) if windows_dir else None
         self.dataset_type = dataset_type
         self.alignment_inner_folds = alignment_inner_folds
         self.epochs = 100 if dataset_type == 0 else 100
@@ -803,7 +856,8 @@ class DownstreamUncertainty:
             self.results['classification']['finetuned_0_results'] = (
                 self._train_test_linear_prob(
                     df, ['gaussian', 'student_t', 'mc_dropout', 'u_ce'],
-                    'original_encoder'
+                    'original_encoder',
+                    retrieval_error=error, window_tag='ft0',
                 )
             )
 
@@ -851,7 +905,9 @@ class DownstreamUncertainty:
                 if run_linear_probe:
                     per_user_scores = self._train_test_linear_prob(
                         df, ['u'], encoder_path,
-                        method_names={'u': encoder_name}
+                        method_names={'u': encoder_name},
+                        retrieval_error=(~np.asarray(results['correct'], dtype=bool)).astype(np.int8),
+                        window_tag=f'ft{finetune_deepth}_{encoder_name}',
                     )
                     # Normalize into method -> subject -> metrics, compatible
                     # with existing paired-subject statistical exports.
@@ -864,13 +920,21 @@ class DownstreamUncertainty:
             if run_linear_probe:
                 self.results['classification'][f'finetuned_{finetune_deepth}_results'] = results_LOSO
             
-    def _train_test_linear_prob(self, df, type_u, encoder_name='', method_names=None):
+    def _train_test_linear_prob(self, df, type_u, encoder_name='', method_names=None,
+                                retrieval_error=None, window_tag=None):
         """Outer LOSO plus nested, subject-grouped OOF uncertainty alignment.
 
         Each outer test subject is excluded from ALL classifier/calibrator fits.
         For every outer split, inner GroupKFold produces held-out predictions
         on the outer-training users to learn the logistic coefficients.
+
+        If self.windows_dir is set and window_tag is given, the per-window
+        held-out scores are saved (one file per call; see __init__).
+        retrieval_error, if given, is the 0/1 nearest-neighbour retrieval
+        error of every row of df and is stored alongside.
         """
+        save_windows = self.windows_dir is not None and window_tag is not None
+        window_frames = []
         results_LOSO = {}
         users = df.user_id.unique()
         if len(users) < 3:
@@ -896,7 +960,7 @@ class DownstreamUncertainty:
             # Both training and test physiological uncertainty are required:
             # train uncertainties fit the alignment; held-out values only score.
             u_train, u_test = df.loc[train_mask, type_u], df.loc[test_mask, type_u]
-            per_method, fit_parameters = train_test_linear_probe_with_alignment(
+            per_method, fit_parameters, window_scores = train_test_linear_probe_with_alignment(
                 X_train=X_train, X_test=X_test,
                 y_train=y_train, y_test=y_test,
                 u_train=u_train, u_test=u_test,
@@ -906,7 +970,26 @@ class DownstreamUncertainty:
                 method_names=method_names,
                 seed=21,
                 return_parameters=True,
+                return_window_scores=True,
             )
+            if save_windows:
+                frame = pd.DataFrame({
+                    'subject': str(user),
+                    # Rows of one subject are contiguous and in .npz order,
+                    # so this is the window's position in the recording.
+                    'window': np.arange(int(test_mask.sum())),
+                    'y_true': y_test,
+                })
+                frame['y_pred'] = window_scores.pop('y_pred')
+                frame['loss'] = window_scores.pop('loss')
+                if retrieval_error is not None:
+                    frame['retrieval_loss'] = np.asarray(
+                        retrieval_error, dtype=np.int8).reshape(-1)[test_mask]
+                if 'motion' in df.columns:
+                    frame['motion'] = df.loc[test_mask, 'motion'].to_numpy(dtype=float)
+                for key, values in window_scores.items():
+                    frame[key] = values
+                window_frames.append(frame)
             self.results['alignment_parameters'].setdefault(encoder_name, {})[str(user)] = fit_parameters
             results_LOSO[str(user)] = _clean_probe_output(per_method)
             del X_train, X_test
@@ -916,6 +999,10 @@ class DownstreamUncertainty:
                       f'{fold_idx}/{len(users)} subjects evaluated.')
 
         print(f'LOSO+alignment {encoder_name} done.')
+        if save_windows and window_frames:
+            _write_window_table(
+                pd.concat(window_frames, ignore_index=True),
+                self.windows_dir / f'windows_{self.dataset_name}_{window_tag}')
         return results_LOSO
 
 import json
@@ -1427,49 +1514,45 @@ def compare_aurc_to_random(results, min_subjects=3):
         out.loc[ids, 'p_holm'] = _holm_adjust(out.loc[ids, 'p'].to_numpy(dtype=float))
     return out.loc[:, cols]
 
-def export_statistical_results(results_dict, dataset_name):
+def export_statistical_results(results_dict, dataset_name, output_dir='downstream_results'):
     """Export Macro-R@1, macro-F1, and AURC with subject-paired tests."""
-    Path('downstream_results').mkdir(parents=True, exist_ok=True)
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
     classification_df, zero_shot_df = summarize_results_df(results_dict)
-    classification_df.to_csv(f'downstream_results/classification_df_{dataset_name}.csv')
-    zero_shot_df.to_csv(f'downstream_results/zero_shot_df_{dataset_name}.csv')
+    classification_df.to_csv(out / f'classification_df_{dataset_name}.csv')
+    zero_shot_df.to_csv(out / f'zero_shot_df_{dataset_name}.csv')
     omnibus, posthoc = compare_paired_results(results_dict)
-    omnibus.to_csv(f'downstream_results/omnibus_tests_{dataset_name}.csv', index=False)
-    posthoc.to_csv(f'downstream_results/posthoc_holm_{dataset_name}.csv', index=False)
+    omnibus.to_csv(out / f'omnibus_tests_{dataset_name}.csv', index=False)
+    posthoc.to_csv(out / f'posthoc_holm_{dataset_name}.csv', index=False)
     compare_alignment_methods(results_dict).to_csv(
-        f'downstream_results/alignment_pairwise_holm_{dataset_name}.csv', index=False)
+        out / f'alignment_pairwise_holm_{dataset_name}.csv', index=False)
     compare_aurc_to_random(results_dict).to_csv(
-        f'downstream_results/aurc_vs_random_{dataset_name}.csv', index=False)
+        out / f'aurc_vs_random_{dataset_name}.csv', index=False)
 
 
 def run_downstream_pipeline():
     """Run full evaluation, refresh only zero-shot, or analyze saved JSON.
 
-    Full runs:
-        python downstream_experiments_statistical.py \
-            --dataset-name pamap --dataset-root downstream_datasets/pamap2/pamap_subject_
+    Full run (writes results JSON, statistics CSVs and per-window files to
+    --output-dir; per-window files go to <output-dir>/windows/):
+        python downstream_experiments.py --dataset-name harth \
+            --dataset-root downstream_datasets/harth/harth_subject_ \
+            --output-dir downstream_results/harth
 
-    CAPTURE-24 is evaluated using LOSO (150 subject-level folds):
-        python downstream_experiments.py \
-            --dataset-name capture24 --dataset-root /path/to/capture24_subject_
+    --dataset-root may contain '{}' for the subject id:
+        --dataset-root "downstream_datasets/pamap2/pamap_subject_{}_wrist"
 
-    Analyze an existing JSON (per-subject zero-shot results are needed
-    for mean/SD and paired tests):
-        python downstream_experiments_statistical.py \
-            --dataset-name pamap --analyze-json results_pamap.json
+    Analyze an existing JSON (statistics only):
+        python downstream_experiments.py --dataset-name pamap \
+            --analyze-json downstream_results/pamap2/results_pamap.json \
+            --output-dir downstream_results/pamap2
 
-    Refresh zero-shot without retraining linear probes, reusing unchanged
-    classification results from the previous run:
-        python downstream_experiments_statistical.py \
-            --dataset-name pamap --dataset-root downstream_datasets/pamap2/pamap_subject_ \
-            --reuse-classification-json results_pamap.json
-            
-    nohup python -u /home/jovyan/downstream_experiments.py --dataset-name capture24 --dataset-root downstream_datasets/capture24/capture24_subject_ > downstream_log_capture24.txt 2>&1 &
-    
-    nohup python -u /home/jovyan/downstream_experiments.py --dataset-name usc --dataset-root downstream_datasets/usc/usc_subject_ > downstream_log_usc.txt 2>&1 &
-    
-    nohup python -u /home/jovyan/downstream_experiments.py --dataset-name harth --dataset-root downstream_datasets/harth/harth_subject_ > downstream_log_harth.txt 2>&1 &
-    
+    Refresh zero-shot without retraining linear probes (no per-window files):
+        python downstream_experiments.py --dataset-name pamap \
+            --dataset-root "downstream_datasets/pamap2/pamap_subject_{}_wrist" \
+            --reuse-classification-json downstream_results/pamap2/results_pamap.json
+
+    run_pipeline.sh runs all five datasets and the figures.
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset-name', type=str, required=True)
@@ -1478,8 +1561,16 @@ def run_downstream_pipeline():
     parser.add_argument('--reuse-classification-json', type=str, default=None)
     parser.add_argument('--alignment-inner-folds', type=int, default=2,
                         help='Subject-grouped inner OOF folds, default 2')
+    parser.add_argument('--output-dir', type=str, default='downstream_results',
+                        help='Folder for results JSON, statistics CSVs and per-window '
+                             'files (default: downstream_results). Use e.g. '
+                             'downstream_results/harth to match the repository layout.')
+    parser.add_argument('--no-save-windows', action='store_true',
+                        help='Do not save per-window held-out scores '
+                             '(needed by kappa_rho_analysis.py).')
     args = parser.parse_args()
     dataset_name = args.dataset_name
+    output_dir = Path(args.output_dir)
 
     if args.analyze_json:
         with open(args.analyze_json, encoding='utf-8') as handle:
@@ -1492,7 +1583,7 @@ def run_downstream_pipeline():
             validate_loso_classification_results(
                 prior_results, get_df_ids(0, dataset_name)
             )
-        export_statistical_results(prior_results, dataset_name)
+        export_statistical_results(prior_results, dataset_name, output_dir)
         print('Statistical analyses saved from:', args.analyze_json)
         return
 
@@ -1520,7 +1611,9 @@ def run_downstream_pipeline():
 
     results = DownstreamUncertainty(
         args.dataset_root, users_ids, dataset_type,
-        alignment_inner_folds=args.alignment_inner_folds)
+        alignment_inner_folds=args.alignment_inner_folds,
+        dataset_name=dataset_name,
+        windows_dir=None if args.no_save_windows else output_dir / 'windows')
     should_train_probe = prior_results is None
     results.make_0_finetuned_results(run_linear_probe=should_train_probe)
 
@@ -1547,11 +1640,11 @@ def run_downstream_pipeline():
         results.results['alignment_parameters'] = prior_results.get(
             'alignment_parameters', {})
         results.results['alignment_protocol'] = prior_results['alignment_protocol']
-    Path('downstream_results').mkdir(parents=True, exist_ok=True)
-    output_json = (f'downstream_results/results_{dataset_name}_statistical.json'
-                   if prior_results is not None else f'downstream_results/results_{dataset_name}.json')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_json = (output_dir / f'results_{dataset_name}_statistical.json'
+                   if prior_results is not None else output_dir / f'results_{dataset_name}.json')
     save_json(results.results, output_json)
-    export_statistical_results(results.results, dataset_name)
+    export_statistical_results(results.results, dataset_name, output_dir)
 
 
 if __name__ == "__main__":

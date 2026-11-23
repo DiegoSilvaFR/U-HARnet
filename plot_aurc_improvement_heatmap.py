@@ -40,8 +40,16 @@ Explicit input paths, in any order:
 Notebook:
     %run plot_aurc_improvement_heatmap.py --output-dir figures
 
+Significance markers (default on): a dot in the upper-right corner of a
+cell marks an improvement over random rejection that is significant after
+Holm correction (one-sided paired Wilcoxon, AURC < R_all, p_Holm < alpha).
+The p-values are read from aurc_vs_random_<dataset>.csv written by
+downstream_experiments.py next to each results_<dataset>.json (Holm families:
+fine-tuning regime x HR head, over the A/B/C/D/E strategies). Use
+--no-significance to omit them, --alpha to change the level.
+
 Outputs: aurc_relative_improvement_heatmap.png / .pdf
-         aurc_relative_improvement_summary.csv
+         aurc_relative_improvement_summary.csv (incl. p_holm_vs_random)
 """
 
 from __future__ import annotations
@@ -139,6 +147,36 @@ def _lookup_units(classification: dict, depth: int, key: str) -> dict:
     }
 
 
+def random_rejection_tests_path(json_path: Path) -> Path:
+    """aurc_vs_random_<name>.csv next to results_<name>[_statistical].json."""
+    name = re.sub(r"\s*\(\d+\)$", "", json_path.stem)
+    name = re.sub(r"^results_", "", name)
+    name = re.sub(r"_statistical$", "", name)
+    return json_path.parent / f"aurc_vs_random_{name}.csv"
+
+
+def load_random_rejection_tests(json_path: Path) -> dict:
+    """{(depth, method): p_holm} for classification AURC < R_all tests."""
+    path = random_rejection_tests_path(json_path)
+    if not path.is_file():
+        warnings.warn(f"No significance file {path}; markers omitted for this dataset.")
+        return {}
+    tests = {}
+    with path.open("r", encoding="utf-8") as fp:
+        for row in csv.DictReader(fp):
+            if row.get("study") != "classification":
+                continue
+            m = re.match(r"finetuned_(\d+)_results", row.get("finetuning", ""))
+            if not m:
+                continue
+            try:
+                p_holm = float(row["p_holm"])
+            except (TypeError, ValueError, KeyError):
+                p_holm = math.nan
+            tests[(int(m.group(1)), row["method"])] = p_holm
+    return tests
+
+
 def summarize_cell(units: dict, dataset: str, depth: int, head: str,
                    mode: str, source: Path) -> dict:
     """Aggregate independently computed unit-level relative improvements."""
@@ -186,8 +224,8 @@ def summarize_cell(units: dict, dataset: str, depth: int, head: str,
     }
 
 
-def load_results(paths: list[Path], include_ce: bool,
-                 include_har_alignment: bool) -> tuple[list[dict], list[tuple[str, str, str]]]:
+def load_results(paths: list[Path], include_ce: bool, include_har_alignment: bool,
+                 alpha: float | None = 0.05) -> tuple[list[dict], list[tuple[str, str, str]]]:
     heads = OrderedDict(HEADS)
     if include_ce:
         heads["CE"] = "CE (0% only)"
@@ -196,9 +234,16 @@ def load_results(paths: list[Path], include_ce: bool,
         # This is an ablation, frequently redundant with HAR entropy.
         modes["/logistic_har_entropy"] = "Aligned HAR"
 
-    rows = [(head, head_label, suffix, mode_label)
-            for head, head_label in heads.items()
-            for suffix, mode_label in modes.items()]
+    # CE uses CE-specific labels for the raw and aligned uncertainty rows.
+    # Keep the original strategy suffixes so data lookup remains unchanged.
+    rows = [
+        (head, head_label, suffix,
+         ("Raw CE" if suffix == "" else
+          "Aligned CE" if suffix == "/logistic_hr" else mode_label)
+         if head == "CE" else mode_label)
+        for head, head_label in heads.items()
+        for suffix, mode_label in modes.items()
+    ]
 
     by_dataset = {}
     for path in paths:
@@ -214,13 +259,14 @@ def load_results(paths: list[Path], include_ce: bool,
             payload = json.load(fp)
         if not isinstance(payload.get("classification"), dict):
             raise KeyError(f"{path}: expected root 'classification' dictionary")
-        by_dataset[key] = (payload["classification"], path)
+        tests = load_random_rejection_tests(path) if alpha is not None else {}
+        by_dataset[key] = (payload["classification"], path, tests)
 
     records = []
     for dataset_key, dataset_name in DATASET_NAMES.items():
         if dataset_key not in by_dataset:
             continue
-        cls, path = by_dataset[dataset_key]
+        cls, path, tests = by_dataset[dataset_key]
         for depth in DEPTHS:
             for head, _, suffix, _ in rows:
                 if head == "CE" and depth != 0:
@@ -228,6 +274,10 @@ def load_results(paths: list[Path], include_ce: bool,
                 lookup = head + suffix
                 units = _lookup_units(cls, depth, lookup)
                 rec = summarize_cell(units, dataset_name, depth, head, suffix, path)
+                p_holm = tests.get((depth, lookup), math.nan)
+                rec["p_holm_vs_random"] = p_holm
+                rec["significant_vs_random"] = bool(
+                    alpha is not None and math.isfinite(p_holm) and p_holm < alpha)
                 records.append(rec)
                 if not units:
                     warnings.warn(f"No entries: {dataset_name} / {depth}% / {lookup}")
@@ -247,7 +297,8 @@ def nice_vlim(values: np.ndarray) -> int:
 def make_heatmap(records: list[dict], row_layout: list[tuple], dataset_names: list[str],
                  output_stem: Path, *, annotate: bool = True, vlim: float | None = None,
                  fig_width: float = 13.5, group_gap: float = 0.22,
-                 panel_gap: float = 0.24, label_rotation: float = 28):
+                 panel_gap: float = 0.24, label_rotation: float = 28,
+                 show_significance: bool = True, alpha: float = 0.05):
     """Create readable three-panel figure with real white gaps between HR heads.
 
     The plotted values are unchanged by spacing. All five dataset names are
@@ -257,15 +308,18 @@ def make_heatmap(records: list[dict], row_layout: list[tuple], dataset_names: li
     n_rows, n_datasets = len(row_layout), len(dataset_names)
     index = {(r["dataset"], r["fine_tuning_pct"], r["head"], r["strategy"]): r
              for r in records}
-    matrices = []
+    matrices, significance = [], []
     for depth in DEPTHS:
         data = np.full((n_rows, n_datasets), np.nan, dtype=float)
+        sig = np.zeros((n_rows, n_datasets), dtype=bool)
         for iy, (head, _, suffix, _) in enumerate(row_layout):
             for ix, dataset in enumerate(dataset_names):
                 r = index.get((dataset, depth, head, suffix or "raw_hr"))
                 if r and r["n_units"]:
                     data[iy, ix] = r["mean_improvement_pct"]
+                    sig[iy, ix] = bool(r.get("significant_vs_random", False))
         matrices.append(data)
+        significance.append(sig)
 
     observed_arrays = [arr[np.isfinite(arr)] for arr in matrices]
     observed = np.concatenate(observed_arrays)
@@ -320,7 +374,7 @@ def make_heatmap(records: list[dict], row_layout: list[tuple], dataset_names: li
         head_blocks.append((head_label, center_y))
         start = end + 1
 
-    for panel_index, (ax, data, title) in enumerate(zip(axes, matrices, titles)):
+    for panel_index, (ax, data, sig, title) in enumerate(zip(axes, matrices, significance, titles)):
         ax.set_title(title, fontsize=11.5, fontweight="bold", pad=9)
         for i, yc in enumerate(row_centers):
             for j in range(n_datasets):
@@ -338,6 +392,10 @@ def make_heatmap(records: list[dict], row_layout: list[tuple], dataset_names: li
                         label, color = "–", "#888888"
                     ax.text(j, yc, label, ha="center", va="center",
                             fontsize=7.7, color=color)
+                if show_significance and sig[i, j] and np.isfinite(value):
+                    dot = "white" if abs(value) >= limit * 0.56 else "#222222"
+                    ax.plot(j + 0.34, yc - 0.30, marker="o", markersize=2.4,
+                            color=dot, linestyle="none", zorder=5)
 
         ax.set_xlim(-0.5, n_datasets - 0.5)
         ax.set_ylim(last_y + 0.5, -0.5)
@@ -367,8 +425,12 @@ def make_heatmap(records: list[dict], row_layout: list[tuple], dataset_names: li
                  fontsize=9, labelpad=4)
     cb.ax.tick_params(labelsize=8, length=3)
     cb.outline.set_linewidth(0.5)
+    if show_significance:
+        fig.text(.5, -0.012, "\u25CF  improvement over random rejection significant after Holm "
+                 f"correction (one-sided paired Wilcoxon, $p_{{\\mathrm{{Holm}}}}<{alpha:g}$)",
+                 fontsize=7.5, ha="center", color="#333333")
     if clipping:
-        fig.text(.5, .014, f"Cell colors clipped to ±{limit:g}%; printed numbers are not clipped.",
+        fig.text(.5, -0.034 if show_significance else .014, f"Cell colors clipped to ±{limit:g}%; printed numbers are not clipped.",
                  fontsize=7, ha="center", color="#555555")
 
     for ext in ("pdf", "png"):
@@ -395,6 +457,10 @@ def main(argv=None):
                         help="Add /logistic_har_entropy ablation as a fifth strategy.")
     parser.add_argument("--no-annotations", action="store_true",
                         help="Disable numeric labels inside heatmap cells.")
+    parser.add_argument("--no-significance", action="store_true",
+                        help="Do not mark cells significantly better than random rejection.")
+    parser.add_argument("--alpha", type=float, default=0.05,
+                        help="Holm-corrected significance level for the markers (default 0.05).")
     parser.add_argument("--vlim", type=float, default=None,
                         help="Optional symmetric colorbar limit in percentage points; "
                              "default covers all displayed means without clipping.")
@@ -423,7 +489,8 @@ def main(argv=None):
         parser.error("--panel-gap should be between 0.05 and 1")
 
     records, row_layout = load_results(args.json_paths, args.include_ce,
-                                       args.include_har_alignment)
+                                       args.include_har_alignment,
+                                       alpha=None if args.no_significance else args.alpha)
     dataset_names = list(DATASET_NAMES.values())
     missing_dataset_names = set(dataset_names) - {r["dataset"] for r in records}
     if missing_dataset_names:
@@ -434,7 +501,8 @@ def main(argv=None):
     figs = make_heatmap(records, row_layout, dataset_names, stem,
                         annotate=not args.no_annotations, vlim=args.vlim,
                         fig_width=args.fig_width, group_gap=args.group_gap,
-                        panel_gap=args.panel_gap, label_rotation=args.label_rotation)
+                        panel_gap=args.panel_gap, label_rotation=args.label_rotation,
+                        show_significance=not args.no_significance, alpha=args.alpha)
 
     csv_path = args.output_dir / "aurc_relative_improvement_summary.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as fp:
@@ -450,4 +518,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    
     main()
