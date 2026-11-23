@@ -48,6 +48,16 @@ downstream_experiments.py next to each results_<dataset>.json (Holm families:
 fine-tuning regime x HR head, over the A/B/C/D/E strategies). Use
 --no-significance to omit them, --alpha to change the level.
 
+Motion-intensity reference rows (default on when available): a "Motion" row
+is added under "Raw HR" in each HR-head block, read from
+figures/kappa_rho_summary.csv (kappa_rho_analysis.py, computed from the
+per-window files with the same per-subject averaging). At 25%/100% the
+classifier differs per head, so the motion values differ per block; at 0%
+they are identical. Their dots come from a one-sided Wilcoxon test with Holm
+correction over all distinct motion tests of a dataset (up to 7). When that CSV also
+holds the A-E strategies, its values are compared with the JSON-derived cells
+as a consistency check. Use --no-motion to omit the rows.
+
 Outputs: aurc_relative_improvement_heatmap.png / .pdf
          aurc_relative_improvement_summary.csv (incl. p_holm_vs_random)
 """
@@ -94,8 +104,11 @@ HEADS = OrderedDict([
     ("mc_dropout", "MC Dropout"),
 ])
 
+MOTION = "motion"  # pseudo-suffix for the motion-intensity reference row
+
 RANKING_MODES = OrderedDict([
     ("", "Raw HR"),
+    (MOTION, "Motion"),
     ("/logistic_hr", "Aligned HR"),
     ("/har_entropy", "HAR entropy"),
     ("/fusion", "Fusion"),
@@ -177,6 +190,50 @@ def load_random_rejection_tests(json_path: Path) -> dict:
     return tests
 
 
+def load_kappa_summary(path: Path | None) -> dict:
+    """{(dataset, depth, head, strategy): row} from kappa_rho_summary.csv."""
+    if path is None or not path.is_file():
+        return {}
+    table = {}
+    with path.open("r", encoding="utf-8") as fp:
+        for row in csv.DictReader(fp):
+            if row.get("loss", "loss") != "loss":
+                continue
+            key = (row["dataset"], int(float(row["fine_tuning_pct"])), row["head"], row["strategy"])
+            table[key] = row
+    return table
+
+
+def _num(row: dict, key: str) -> float:
+    try:
+        return float(row.get(key, "nan"))
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def motion_record(row: dict | None, dataset: str, depth: int, head: str,
+                  source: Path, alpha: float | None) -> dict:
+    """Fig. 4 record for the motion reference row (same fields as summarize_cell)."""
+    row = row or {}
+    p_holm = _num(row, "p_holm_vs_random")
+    n = int(_num(row, "n_subjects")) if row else 0
+    return {
+        "dataset": dataset, "fine_tuning_pct": depth, "head": head, "strategy": MOTION,
+        "n_units": n, "n_excluded_zero_R_all": 0, "n_excluded_invalid": 0,
+        "mean_improvement_pct": _num(row, "mean_improvement_pct"),
+        "sd_improvement_pct": _num(row, "sd_improvement_pct"),
+        "sem_improvement_pct": (_num(row, "sd_improvement_pct") / math.sqrt(n)) if n > 1 else math.nan,
+        "median_improvement_pct": _num(row, "median_improvement_pct"),
+        "fraction_units_improved": _num(row, "fraction_units_improved"),
+        "mean_absolute_risk_reduction": _num(row, "mean_absolute_risk_reduction"),
+        "mean_R_all": _num(row, "mean_R_all"),
+        "mean_AURC": _num(row, "mean_R_all") - _num(row, "mean_absolute_risk_reduction"),
+        "source_file": str(source),
+        "p_holm_vs_random": p_holm,
+        "significant_vs_random": bool(alpha is not None and math.isfinite(p_holm) and p_holm < alpha),
+    }
+
+
 def summarize_cell(units: dict, dataset: str, depth: int, head: str,
                    mode: str, source: Path) -> dict:
     """Aggregate independently computed unit-level relative improvements."""
@@ -225,11 +282,19 @@ def summarize_cell(units: dict, dataset: str, depth: int, head: str,
 
 
 def load_results(paths: list[Path], include_ce: bool, include_har_alignment: bool,
-                 alpha: float | None = 0.05) -> tuple[list[dict], list[tuple[str, str, str]]]:
+                 alpha: float | None = 0.05, kappa_summary: Path | None = None,
+                 include_motion: bool = True) -> tuple[list[dict], list[tuple[str, str, str]]]:
     heads = OrderedDict(HEADS)
     if include_ce:
         heads["CE"] = "CE (0% only)"
     modes = OrderedDict(RANKING_MODES)
+    per_window = load_kappa_summary(kappa_summary)
+    has_motion = any(k[3] == MOTION for k in per_window)
+    if include_motion and not has_motion:
+        warnings.warn(f"No motion rows in {kappa_summary}; run kappa_rho_analysis.py "
+                      "on the per-window files to add them. Motion rows omitted.")
+    if not (include_motion and has_motion):
+        modes.pop(MOTION)
     if include_har_alignment:
         # This is an ablation, frequently redundant with HAR entropy.
         modes["/logistic_har_entropy"] = "Aligned HAR"
@@ -243,6 +308,7 @@ def load_results(paths: list[Path], include_ce: bool, include_har_alignment: boo
          if head == "CE" else mode_label)
         for head, head_label in heads.items()
         for suffix, mode_label in modes.items()
+        if not (head == "CE" and suffix == MOTION)  # CE block: motion is shown above
     ]
 
     by_dataset = {}
@@ -271,6 +337,13 @@ def load_results(paths: list[Path], include_ce: bool, include_har_alignment: boo
             for head, _, suffix, _ in rows:
                 if head == "CE" and depth != 0:
                     continue
+                if suffix == MOTION:
+                    row = per_window.get((dataset_name, depth, head, MOTION))
+                    records.append(motion_record(row, dataset_name, depth, head,
+                                                 kappa_summary, alpha))
+                    if not row:
+                        warnings.warn(f"No motion entry: {dataset_name} / {depth}% / {head}")
+                    continue
                 lookup = head + suffix
                 units = _lookup_units(cls, depth, lookup)
                 rec = summarize_cell(units, dataset_name, depth, head, suffix, path)
@@ -284,6 +357,16 @@ def load_results(paths: list[Path], include_ce: bool, include_har_alignment: boo
 
     if not any(r["n_units"] > 0 for r in records):
         raise ValueError("No classification AURC / R_all pairs were found in the JSON files")
+    diffs = []
+    for r in records:
+        if r["strategy"] == MOTION:
+            continue
+        row = per_window.get((r["dataset"], r["fine_tuning_pct"], r["head"], r["strategy"]))
+        if row is not None and r["n_units"]:
+            diffs.append(abs(_num(row, "mean_improvement_pct") - r["mean_improvement_pct"]))
+    if diffs:
+        print(f"check: per-window files vs results JSON, {len(diffs)} cells, "
+              f"max |difference| = {max(diffs):.2e} percentage points (expected ~0)")
     return records, [(head, head_label, suffix, mode_label)
                      for head, head_label, suffix, mode_label in rows]
 
@@ -461,6 +544,11 @@ def main(argv=None):
                         help="Do not mark cells significantly better than random rejection.")
     parser.add_argument("--alpha", type=float, default=0.05,
                         help="Holm-corrected significance level for the markers (default 0.05).")
+    parser.add_argument("--kappa-summary", type=Path,
+                        default=Path("figures/kappa_rho_summary.csv"),
+                        help="kappa_rho_analysis.py output providing the Motion rows.")
+    parser.add_argument("--no-motion", action="store_true",
+                        help="Omit the motion-intensity reference rows.")
     parser.add_argument("--vlim", type=float, default=None,
                         help="Optional symmetric colorbar limit in percentage points; "
                              "default covers all displayed means without clipping.")
@@ -490,7 +578,9 @@ def main(argv=None):
 
     records, row_layout = load_results(args.json_paths, args.include_ce,
                                        args.include_har_alignment,
-                                       alpha=None if args.no_significance else args.alpha)
+                                       alpha=None if args.no_significance else args.alpha,
+                                       kappa_summary=args.kappa_summary,
+                                       include_motion=not args.no_motion)
     dataset_names = list(DATASET_NAMES.values())
     missing_dataset_names = set(dataset_names) - {r["dataset"] for r in records}
     if missing_dataset_names:

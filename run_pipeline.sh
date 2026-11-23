@@ -43,17 +43,19 @@ if [ "${SKIP_DOWNSTREAM:-0}" != "1" ]; then
   done
 fi
 
-echo "=== Fig. 4: AURC heatmap with significance markers"
-"$PYTHON" plot_aurc_improvement_heatmap.py --output-dir figures
-
-echo "=== Theorem 1: kappa / rho estimation"
-"$PYTHON" kappa_rho_analysis.py --windows downstream_results --output-dir figures
+echo "=== Theorem 1: kappa / rho estimation (also provides Fig. 4 motion rows)"
+"$PYTHON" kappa_rho_analysis.py --windows downstream_results --output-dir figures \
+  --check-summary none
 "$PYTHON" kappa_rho_analysis.py --windows downstream_results --thin 3 \
-  --output-dir figures/kappa_rho_thin3
+  --output-dir figures/kappa_rho_thin3 --check-summary none
 "$PYTHON" kappa_rho_analysis.py --windows downstream_results --bins 10 \
-  --output-dir figures/kappa_rho_bins10
+  --output-dir figures/kappa_rho_bins10 --check-summary none
 "$PYTHON" kappa_rho_analysis.py --windows downstream_results --bins 50 \
-  --output-dir figures/kappa_rho_bins50
+  --output-dir figures/kappa_rho_bins50 --check-summary none
+
+echo "=== Fig. 4: AURC heatmap with motion rows and significance markers"
+"$PYTHON" plot_aurc_improvement_heatmap.py --output-dir figures \
+  --kappa-summary figures/kappa_rho_summary.csv
 
 echo "=== Information-alignment map"
 "$PYTHON" plot_information_alignment_map.py \

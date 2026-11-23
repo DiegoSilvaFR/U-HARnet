@@ -50,6 +50,12 @@ Usage (from the repository root, after running downstream_experiments.py):
         --output-dir figures/kappa_rho_thin3
     python kappa_rho_analysis.py --loss retrieval_loss --output-dir figures/kappa_rho_retrieval
 
+Motion rows also get a one-sided paired Wilcoxon test of AURC < R_all
+(p_vs_random) with Holm correction over all distinct motion tests of a
+dataset (one at 0%, one per head at 25% and 100%; p_holm_vs_random); plot_aurc_improvement_heatmap.py uses them for the
+"Motion" rows and significance dots of Fig. 4. The existing A-E tests in
+aurc_vs_random_<dataset>.csv are not affected.
+
 Outputs (in --output-dir, default figures/):
     kappa_rho_summary.csv          one row per dataset x regime x head x strategy
     conditional_information.csv    HR beyond motion, HR beyond entropy,
@@ -244,8 +250,14 @@ def summarize_score(df, loss_col, score_col, bins_spec, n_boot, seed):
     est = aggregate(stats)
     lo, hi = bootstrap(stats, n_boot, np.random.default_rng(seed + 1))
     detected = bool(lo[3] > 0)
+    improvement = 100 * (stats["delta"] / stats["r_all"]).to_numpy(dtype=float)
     out = dict(
         n_subjects=len(stats),
+        sd_improvement_pct=float(improvement.std(ddof=1)) if len(improvement) > 1 else np.nan,
+        median_improvement_pct=float(np.median(improvement)),
+        fraction_units_improved=float(np.mean(improvement > 0)),
+        mean_absolute_risk_reduction=float(stats["delta"].mean()),
+        p_vs_random=one_sided_vs_random(stats["delta"].to_numpy(dtype=float)),
         median_windows_per_subject=float(stats["n"].median()),
         median_bins=float(stats["bins"].median()),
         mean_R_all=float(stats["r_all"].mean()),
@@ -259,6 +271,18 @@ def summarize_score(df, loss_col, score_col, bins_spec, n_boot, seed):
         information_detected=detected,
     )
     return out, stats
+
+
+def one_sided_vs_random(deltas, min_subjects=3):
+    """One-sided paired Wilcoxon of Delta_s = R_all,s - AURC_s > 0, as in
+    compare_aurc_to_random() of downstream_experiments.py."""
+    from scipy.stats import wilcoxon
+    deltas = np.asarray(deltas, dtype=float)
+    if len(deltas) < min_subjects:
+        return np.nan
+    if np.allclose(deltas, 0.0, atol=1e-14, rtol=0):
+        return 1.0
+    return float(wilcoxon(deltas, alternative="greater", zero_method="wilcox").pvalue)
 
 
 def summarize_conditional(df, loss_col, score_col, cond_col, n_boot, seed):
@@ -342,13 +366,13 @@ def analyse(files, loss_col, bins_spec, n_boot, thin, seed):
                     continue
                 summary.append(dict(dataset=dataset, fine_tuning_pct=depth, head=source,
                                     strategy=strategy, score_column=col, loss=loss_col,
-                                    **res[0]))
+                                    window_file=path.name, **res[0]))
             if "motion" in df.columns:
                 res = run("motion", (path, "motion"))
                 if res is not None:
                     summary.append(dict(dataset=dataset, fine_tuning_pct=depth, head=source,
                                         strategy="motion", score_column="motion", loss=loss_col,
-                                        **res[0]))
+                                        window_file=path.name, **res[0]))
 
             # Conditional information and HR-vs-motion tests (raw HR score)
             pairs = []
@@ -375,6 +399,15 @@ def analyse(files, loss_col, bins_spec, n_boot, thin, seed):
                 conditional.append(row)
 
     summary = pd.DataFrame(summary)
+    if len(summary):
+        summary["p_holm_vs_random"] = np.nan
+        motion = summary["strategy"] == "motion"
+        for _, block in summary[motion].groupby("dataset"):
+            # Family: all distinct motion tests of a dataset (0%: one shared test,
+            # 25% and 100%: one per head), i.e. up to 7 tests.
+            unique = block.drop_duplicates("window_file")
+            adjusted = dict(zip(unique["window_file"], holm(unique["p_vs_random"].to_numpy())))
+            summary.loc[block.index, "p_holm_vs_random"] = block["window_file"].map(adjusted)
     conditional = pd.DataFrame(conditional)
     if len(conditional) and "hr_vs_motion_p" in conditional:
         conditional["hr_vs_motion_p_holm"] = np.nan

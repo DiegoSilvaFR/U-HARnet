@@ -387,6 +387,16 @@ summary CSV gains `p_holm_vs_random` and `significant_vs_random` columns. With
 five subjects, no PAMAP2 cell can reach significance (minimum one-sided exact
 Wilcoxon p = 1/32).
 
+**Motion rows.** When `figures/kappa_rho_summary.csv` exists (written by
+`kappa_rho_analysis.py`, see section 4), a "Motion" row is added under "Raw HR" in
+every HR-head block: the relative AURC improvement of the motion-intensity score,
+with the same per-subject averaging. At 25%/100% the classifier differs per head, so
+the values differ per block; at 0% they are identical. Their dots use a one-sided
+Wilcoxon test with Holm correction over all distinct motion tests of a dataset (up to
+7). The script also prints the largest difference between the per-window values and
+the JSON values for the other cells (≈ 0 expected). `--no-motion` omits the rows;
+`run_pipeline.sh` runs the analysis before the figure so the rows are included.
+
 The JSON preserves per-subject metrics, regression-head comparisons and alignment information. The CSV files contain summaries and tests. To regenerate the representation-quality plot from multiple results JSON files, see the metric-key compatibility note below:
 
 ```bash
