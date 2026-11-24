@@ -2,7 +2,7 @@ study,finetuning,upstream_head,method,n_subjects,mean_R_all,mean_AURC,mean_gain_
 zero_shot,finetuned_0_results,retrieval,CE,15,0.2558461394073062,0.18846101375477817,0.06738512565252798,15,one-sided paired Wilcoxon,3.0517578125e-05,0.0001220703125
 zero_shot,finetuned_0_results,retrieval,gaussian,15,0.2558461394073062,0.31489488138760646,-0.059048741980300336,3,one-sided paired Wilcoxon,0.99957275390625,1.0
 zero_shot,finetuned_0_results,retrieval,student_t,15,0.2558461394073062,0.31796147735188435,-0.06211533794457819,1,one-sided paired Wilcoxon,0.999969482421875,1.0
-zero_shot,finetuned_0_results,retrieval,mc_dropout,15,0.2558461394073062,0.36931979586239866,-0.11347365645509248,0,one-sided paired Wilcoxon,1.0,1.0
+zero_shot,finetuned_0_results,retrieval,mc_dropout,15,0.2558461394073062,0.3720929293509382,-0.11624678994363201,0,one-sided paired Wilcoxon,1.0,1.0
 zero_shot,finetuned_25_results,retrieval,gaussian,15,0.2696918401009972,0.32643274938208594,-0.05674090928108875,1,one-sided paired Wilcoxon,0.99969482421875,1.0
 zero_shot,finetuned_25_results,retrieval,student_t,15,0.2688207010381611,0.3491216686023615,-0.08030096756420038,1,one-sided paired Wilcoxon,0.999969482421875,1.0
 zero_shot,finetuned_25_results,retrieval,mc_dropout,15,0.26168606472910505,0.32980354715981414,-0.06811748243070907,1,one-sided paired Wilcoxon,0.999969482421875,1.0
@@ -19,10 +19,10 @@ classification,finetuned_0_results,student_t,student_t/logistic_hr,15,0.31404328
 classification,finetuned_0_results,student_t,student_t/har_entropy,15,0.31404328513488156,0.18604092998675859,0.12800235514812303,15,one-sided paired Wilcoxon,3.0517578125e-05,0.000152587890625
 classification,finetuned_0_results,student_t,student_t/fusion,15,0.31404328513488156,0.16625020088250217,0.14779308425237941,15,one-sided paired Wilcoxon,3.0517578125e-05,0.000152587890625
 classification,finetuned_0_results,student_t,student_t/logistic_har_entropy,15,0.31404328513488156,0.18604092998675859,0.12800235514812303,15,one-sided paired Wilcoxon,3.0517578125e-05,0.000152587890625
-classification,finetuned_0_results,mc_dropout,mc_dropout,15,0.31404328513488156,0.3784288699396628,-0.06438558480478122,1,one-sided paired Wilcoxon,0.999786376953125,0.999786376953125
-classification,finetuned_0_results,mc_dropout,mc_dropout/logistic_hr,15,0.31404328513488156,0.21292222345219394,0.10112106168268767,14,one-sided paired Wilcoxon,6.103515625e-05,0.000152587890625
+classification,finetuned_0_results,mc_dropout,mc_dropout,15,0.31404328513488156,0.3819773873176618,-0.06793410218278019,1,one-sided paired Wilcoxon,0.999786376953125,0.999786376953125
+classification,finetuned_0_results,mc_dropout,mc_dropout/logistic_hr,15,0.31404328513488156,0.21371593066624067,0.10032735446864094,14,one-sided paired Wilcoxon,6.103515625e-05,0.000152587890625
 classification,finetuned_0_results,mc_dropout,mc_dropout/har_entropy,15,0.31404328513488156,0.18604092998675859,0.12800235514812303,15,one-sided paired Wilcoxon,3.0517578125e-05,0.000152587890625
-classification,finetuned_0_results,mc_dropout,mc_dropout/fusion,15,0.31404328513488156,0.18105980628177554,0.13298347885310602,15,one-sided paired Wilcoxon,3.0517578125e-05,0.000152587890625
+classification,finetuned_0_results,mc_dropout,mc_dropout/fusion,15,0.31404328513488156,0.17936358929928345,0.13467969583559816,15,one-sided paired Wilcoxon,3.0517578125e-05,0.000152587890625
 classification,finetuned_0_results,mc_dropout,mc_dropout/logistic_har_entropy,15,0.31404328513488156,0.18604092998675859,0.12800235514812303,15,one-sided paired Wilcoxon,3.0517578125e-05,0.000152587890625
 classification,finetuned_0_results,CE,CE,15,0.31404328513488156,0.22981315686546508,0.08423012826941653,14,one-sided paired Wilcoxon,0.00030517578125,0.0006103515625
 classification,finetuned_0_results,CE,CE/logistic_hr,15,0.31404328513488156,0.22981315686546508,0.08423012826941653,14,one-sided paired Wilcoxon,0.00030517578125,0.0006103515625

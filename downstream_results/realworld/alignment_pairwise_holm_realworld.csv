@@ -7,10 +7,10 @@ finetuned_0_results,gaussian,AURC,B_vs_A,gaussian/logistic_hr,gaussian,15,0.2391
 finetuned_0_results,gaussian,AURC,D_vs_E,gaussian/fusion,gaussian/logistic_har_entropy,15,0.1819964073429847,0.18604092998675853,-0.004044522643773812,wilcoxon,56.0,0.846923828125,1.0
 finetuned_0_results,gaussian,AURC,D_vs_B,gaussian/fusion,gaussian/logistic_hr,15,0.1819964073429847,0.23912591534824854,-0.05712950800526377,wilcoxon,9.0,0.00201416015625,0.008056640625
 finetuned_0_results,gaussian,AURC,D_vs_C,gaussian/fusion,gaussian/har_entropy,15,0.1819964073429847,0.18604092998675853,-0.004044522643773812,wilcoxon,56.0,0.846923828125,1.0
-finetuned_0_results,mc_dropout,AURC,B_vs_A,mc_dropout/logistic_hr,mc_dropout,15,0.2129222234521939,0.3784288699396628,-0.1655066464874689,wilcoxon,3.0,0.00030517578125,0.001220703125
-finetuned_0_results,mc_dropout,AURC,D_vs_E,mc_dropout/fusion,mc_dropout/logistic_har_entropy,15,0.18105980628177556,0.18604092998675853,-0.004981123704982982,wilcoxon,47.0,0.48870849609375,0.9774169921875
-finetuned_0_results,mc_dropout,AURC,D_vs_B,mc_dropout/fusion,mc_dropout/logistic_hr,15,0.18105980628177556,0.2129222234521939,-0.031862417170418364,wilcoxon,15.0,0.00836181640625,0.02508544921875
-finetuned_0_results,mc_dropout,AURC,D_vs_C,mc_dropout/fusion,mc_dropout/har_entropy,15,0.18105980628177556,0.18604092998675853,-0.004981123704982982,wilcoxon,47.0,0.48870849609375,0.9774169921875
+finetuned_0_results,mc_dropout,AURC,B_vs_A,mc_dropout/logistic_hr,mc_dropout,15,0.21371593066624064,0.3819773873176618,-0.1682614566514211,wilcoxon,4.0,0.00042724609375,0.001708984375
+finetuned_0_results,mc_dropout,AURC,D_vs_E,mc_dropout/fusion,mc_dropout/logistic_har_entropy,15,0.17936358929928342,0.18604092998675853,-0.0066773406874751084,wilcoxon,44.0,0.389404296875,0.77880859375
+finetuned_0_results,mc_dropout,AURC,D_vs_B,mc_dropout/fusion,mc_dropout/logistic_hr,15,0.17936358929928342,0.21371593066624064,-0.03435234136695722,wilcoxon,13.0,0.00537109375,0.01611328125
+finetuned_0_results,mc_dropout,AURC,D_vs_C,mc_dropout/fusion,mc_dropout/har_entropy,15,0.17936358929928342,0.18604092998675853,-0.0066773406874751084,wilcoxon,44.0,0.389404296875,0.77880859375
 finetuned_0_results,student_t,AURC,B_vs_A,student_t/logistic_hr,student_t,15,0.2195421376571454,0.4025970355855932,-0.18305489792844773,wilcoxon,7.0,0.00115966796875,0.00347900390625
 finetuned_0_results,student_t,AURC,D_vs_E,student_t/fusion,student_t/logistic_har_entropy,15,0.16625020088250217,0.18604092998675853,-0.019790729104256357,wilcoxon,43.0,0.359130859375,0.71826171875
 finetuned_0_results,student_t,AURC,D_vs_B,student_t/fusion,student_t/logistic_hr,15,0.16625020088250217,0.2195421376571454,-0.05329193677464319,wilcoxon,3.0,0.00030517578125,0.001220703125

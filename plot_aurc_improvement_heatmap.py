@@ -76,7 +76,10 @@ from pathlib import Path
 import matplotlib as mpl
 mpl.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import TwoSlopeNorm
+try:
+    from matplotlib.colors import TwoSlopeNorm          # matplotlib >= 3.2
+except ImportError:  # pragma: no cover - matplotlib 3.1
+    from matplotlib.colors import DivergingNorm as TwoSlopeNorm
 from matplotlib.cm import ScalarMappable
 from matplotlib.patches import Rectangle
 import numpy as np
@@ -158,6 +161,16 @@ def _lookup_units(classification: dict, depth: int, key: str) -> dict:
         for unit_id, row in method.items()
         if isinstance(row, dict) and "AURC" in row and "R_all" in row
     }
+
+
+def _get_cmap(name: str):
+    """Copy of a named colormap on old and new matplotlib versions
+    (mpl.colormaps exists from 3.5; cm.get_cmap was removed in 3.9)."""
+    registry = getattr(mpl, "colormaps", None)
+    if registry is not None:
+        return registry[name].copy()
+    import copy
+    return copy.copy(mpl.cm.get_cmap(name))
 
 
 def random_rejection_tests_path(json_path: Path) -> Path:
@@ -420,7 +433,7 @@ def make_heatmap(records: list[dict], row_layout: list[tuple], dataset_names: li
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     })
-    cmap = mpl.colormaps["RdBu"].copy()  # negative red, positive blue
+    cmap = _get_cmap("RdBu")  # negative red, positive blue
     norm = TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
 
     # A true blank space is introduced *between* groups (not a dark rule).

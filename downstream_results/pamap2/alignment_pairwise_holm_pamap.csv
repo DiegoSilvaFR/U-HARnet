@@ -7,10 +7,10 @@ finetuned_0_results,gaussian,AURC,B_vs_A,gaussian/logistic_hr,gaussian,5,0.19754
 finetuned_0_results,gaussian,AURC,D_vs_E,gaussian/fusion,gaussian/logistic_har_entropy,5,0.14316331968969737,0.1441176147558714,-0.0009542950661740629,wilcoxon,5.0,0.625,1.0
 finetuned_0_results,gaussian,AURC,D_vs_B,gaussian/fusion,gaussian/logistic_hr,5,0.14316331968969737,0.19754036854750004,-0.0543770488578027,wilcoxon,1.0,0.125,0.375
 finetuned_0_results,gaussian,AURC,D_vs_C,gaussian/fusion,gaussian/har_entropy,5,0.14316331968969737,0.1441176147558714,-0.0009542950661740629,wilcoxon,5.0,0.625,1.0
-finetuned_0_results,mc_dropout,AURC,B_vs_A,mc_dropout/logistic_hr,mc_dropout,5,0.1677793628945387,0.35113456778166174,-0.183355204887123,wilcoxon,0.0,0.0625,0.25
-finetuned_0_results,mc_dropout,AURC,D_vs_E,mc_dropout/fusion,mc_dropout/logistic_har_entropy,5,0.14683576639589438,0.1441176147558714,0.0027181516400229698,wilcoxon,5.0,0.625,1.0
-finetuned_0_results,mc_dropout,AURC,D_vs_B,mc_dropout/fusion,mc_dropout/logistic_hr,5,0.14683576639589438,0.1677793628945387,-0.02094359649864436,wilcoxon,3.0,0.3125,0.9375
-finetuned_0_results,mc_dropout,AURC,D_vs_C,mc_dropout/fusion,mc_dropout/har_entropy,5,0.14683576639589438,0.1441176147558714,0.0027181516400229698,wilcoxon,5.0,0.625,1.0
+finetuned_0_results,mc_dropout,AURC,B_vs_A,mc_dropout/logistic_hr,mc_dropout,5,0.16888171349417175,0.34366958096184164,-0.1747878674676699,wilcoxon,0.0,0.0625,0.25
+finetuned_0_results,mc_dropout,AURC,D_vs_E,mc_dropout/fusion,mc_dropout/logistic_har_entropy,5,0.1465690405994183,0.1441176147558714,0.0024514258435469087,wilcoxon,5.0,0.625,1.0
+finetuned_0_results,mc_dropout,AURC,D_vs_B,mc_dropout/fusion,mc_dropout/logistic_hr,5,0.1465690405994183,0.16888171349417175,-0.022312672894753447,wilcoxon,3.0,0.3125,0.9375
+finetuned_0_results,mc_dropout,AURC,D_vs_C,mc_dropout/fusion,mc_dropout/har_entropy,5,0.1465690405994183,0.1441176147558714,0.0024514258435469087,wilcoxon,5.0,0.625,1.0
 finetuned_0_results,student_t,AURC,B_vs_A,student_t/logistic_hr,student_t,5,0.1675796475032359,0.3636084795488575,-0.19602883204562158,wilcoxon,0.0,0.0625,0.25
 finetuned_0_results,student_t,AURC,D_vs_E,student_t/fusion,student_t/logistic_har_entropy,5,0.12127908085304137,0.1441176147558714,-0.02283853390283003,wilcoxon,4.0,0.4375,0.875
 finetuned_0_results,student_t,AURC,D_vs_B,student_t/fusion,student_t/logistic_hr,5,0.12127908085304137,0.1675796475032359,-0.04630056665019456,wilcoxon,1.0,0.125,0.375
